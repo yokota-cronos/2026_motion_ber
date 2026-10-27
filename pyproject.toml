@@ -1,0 +1,23 @@
+# OptiTrack のモーションキャプチャと NFC VHBR の BER 測定 (ADP3250 x 2) を同時に回す。
+#
+# BER 側は ../2026_nfc_vhbr_ber、NatNet の Python クライアントは
+# ../nanoVNA_OptiTrack_get_dataset/NatNetSDK/Samples/PythonClient をそのまま読む
+# (場所が違うときは環境変数 NFC_BER_DIR / NATNET_DIR で指定)。依存は BER 側と同じ。
+#     uv run motion_ber_gui.py
+
+[project]
+name = "motion-ber"
+version = "0.1.0"
+description = "Simultaneous OptiTrack motion capture and NFC VHBR BER measurement"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.10.9",
+    "numpy>=1.24",
+    "opencv-python>=4.10",
+    "scipy>=1.10",
+    "ziglang<0.17",
+]
+
+[tool.uv]
+package = false

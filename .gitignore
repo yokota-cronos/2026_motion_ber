@@ -1,0 +1,8 @@
+# Python / uv
+__pycache__/
+.venv/
+
+# 記録 (~/nfc_vhbr_captures/ に出るのでここには無いはずだが、念のため)
+*.ad3
+*.ad3.json
+*.mp4
