@@ -312,13 +312,13 @@ PANEL = """
       <span id="rTime" style="font-variant-numeric:tabular-nums;font-weight:600"></span>
     </div>
     <input id="rSeek" type="range" min="0" max="1" step="any" value="0" style="width:100%;margin:6px 0 0">
-    <canvas id="rTl" style="height:110px;cursor:pointer"></canvas>
+    <canvas id="rTl" data-h="110" data-fixed="1" style="height:110px;cursor:pointer"></canvas>
     <div class="note" id="rAt"></div>
   </section>
   <div class="pair" id="mViews">
     <section class="card">
       <h2>マーカーの 3D 表示<small>ドラッグで回転、ホイールで拡大縮小、ダブルクリックで戻す</small><label class="chk" style="float:right;font-weight:400" title="Motive の設定 (Up Axis) に合わせる。この台では Z が上">上の軸<select id="mUp"><option value="z" selected>Z</option><option value="y">Y</option></select></label></h2>
-      <canvas id="m3d" style="height:360px;cursor:grab;touch-action:none"></canvas>
+      <canvas id="m3d" data-h="360" data-fixed="1" style="height:360px;cursor:grab;touch-action:none"></canvas>
     </section>
     <section class="card">
       <h2>カメラ<small id="cInfo"></small></h2>
@@ -666,22 +666,51 @@ def replay_close() -> dict:
 
 
 def _raw_material(path: Path) -> dict:
-    """ber_gui の play_worker と同じ手順で .ad3 を復調の材料にする (2 本まで覚えておく)。"""
+    """.ad3 を、ライブと**同じ手順**で復調できる形にする (2 本まで覚えておく)。
+
+    ライブの live_worker と同じく fast_ddc (C) と decim_for(div) を使う。ber_gui の play_worker の
+    手順 (ddc() + 間引き 8 固定) だと、FC/8 では 1 枚もフレームが取れなかった (2026-10-27)。"""
     key = str(path)
     if key not in _RAW_CACHE:
-        x, _, J = fd.ddc(path, 8)                     # 初回だけ計算して .bb8.npy に置く
-        fs_raw = float(J["sample_rate_hz"])
-        x = np.ascontiguousarray(x[SKIP:])
+        J = json.loads(Path(str(path) + ".json").read_text())
         div = int(J["frame"]["div"])
-        rx = fd.receiver_for(J, fs_raw / 8)
-        st, _ = rx.timing(x)
+        decim = fd.decim_for(div)
+        fs_raw = float(J["sample_rate_hz"])
+        vpl, off = float(J["volts_per_lsb"]), float(J.get("offset_v", 0.0))
+        raw = np.fromfile(path, dtype="<i2")
+        x = np.ascontiguousarray(fd.fast_ddc(raw, fs_raw, vpl, off, div=div, decim=decim)[SKIP:])
         while len(_RAW_CACHE) >= 2:
             _RAW_CACHE.pop(next(iter(_RAW_CACHE)))
-        _RAW_CACHE[key] = dict(x=x, J=J, fs_raw=fs_raw, rx=rx, st=st,
-                               raw=np.memmap(path, dtype="<i2", mode="r"),
-                               vpl=float(J["volts_per_lsb"]), off=float(J.get("offset_v", 0.0)),
-                               ddc_delay=(fd.ddc_taps(fs_raw, div, 8).size - 1) / 2)
+        _RAW_CACHE[key] = dict(x=x, J=J, fs_raw=fs_raw, rx=fd.receiver_for(J, fs_raw / decim), decim=decim,
+                               raw=raw, vpl=vpl, off=off, ddc_delay=(fd.ddc_taps(fs_raw, div, decim).size - 1) / 2)
     return _RAW_CACHE[key]
+
+
+def _demod_all(M: dict) -> dict:
+    """収録を丸ごと、ライブの rx.process() と同じ順 (設定 -> 窓の位置 -> まとめて復調) で復調する。
+
+    1 フレームだけ復調すると、前のフレームから引き継ぐ受信部の状態が無いので誤り数がライブと
+    違う (2026-10-27、フレーム 10 がライブ 12 ビット / 単独 5 ビット)。窓の位置も受信部の設定で
+    変わるので、設定を変えたときだけやり直す。こうするとフレームごとの誤り数がライブと一致する。"""
+    rx = M["rx"]
+    opts = (bg.STATE.rx_filter, bg.STATE.agc_div, bg.STATE.agc_auto)
+    if M.get("opts") != opts:
+        bg.apply_rx_options(rx)
+        st, _ = rx.timing(M["x"])
+        res = rx.demod(M["x"], st, detail=True)
+        fe = np.full(st.size, -1, np.int64)
+        fe[res["status"] == 0] = res["frame_errors"]
+        M.update(opts=opts, st=st, res=res, fe=fe)
+    return M
+
+
+def _one_frame(res: dict, fe: np.ndarray, k: int) -> dict:
+    """まとめて復調した結果から、フレーム k だけの結果を作る (build_view は渡された先頭のフレームを描く)。"""
+    n = fe.size
+    out = {key: (v[k:k + 1] if isinstance(v, np.ndarray) and v.shape[:1] == (n,) else v)
+           for key, v in res.items() if key != "frame_errors"}
+    out["frame_errors"] = fe[k:k + 1][fe[k:k + 1] >= 0]
+    return out
 
 
 def replay_view(t: float) -> dict:
@@ -693,24 +722,21 @@ def replay_view(t: float) -> dict:
         c = r.cap_at(t)
         if c is None or not c["raw"]:
             return dict(ok=True, view=False, cap=None if c is None else c["cap"])
-        M = _raw_material(r.dir / c["raw"])
-        rx, st = M["rx"], M["st"]
+        M = _demod_all(_raw_material(r.dir / c["raw"]))
+        rx, st, fe = M["rx"], M["st"], M["fe"]
         if st.size == 0:
             return dict(ok=True, view=False, cap=c["cap"], message="この収録ではフレームが見つかりません")
-        # 窓の先頭の時刻 (収録の先頭から) で、t を含むフレームを選ぶ
+        # 窓の先頭の時刻 (収録の先頭から) で、t を含むフレームを選ぶ。frames.csv と同じ式
         ts = (st + SKIP) / rx.fs
         k = int(np.clip(np.searchsorted(ts, t - c["t0"], side="right") - 1, 0, st.size - 1))
-        bg.apply_rx_options(rx)
-        res = rx.demod(M["x"], st[k:k + 1], detail=True)
-        r0 = max(0, int((st[k] + SKIP) * 8 - M["ddc_delay"]))
+        res = _one_frame(M["res"], fe, k)
+        r0 = max(0, int((st[k] + SKIP) * M["decim"] - M["ddc_delay"]))
         view = bg.make_view(M["raw"], M["vpl"], M["off"], M["fs_raw"], M["x"], rx, res, M["ddc_delay"],
                             spec_from=r0)
-        fe = np.full(res["status"].size, -1, int)
-        fe[res["status"] == 0] = res["frame_errors"]
         with bg.STATE.lock:
-            bg.STATE.latest.update(view, frame_errors=fe.tolist(), npay=rx.npay)
+            bg.STATE.latest.update(view, frame_errors=[int(fe[k])], npay=rx.npay)
             bg.STATE.view_id += 1
-        return dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[0]))
+        return dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[k]))
 
 
 def page() -> bytes:
@@ -721,6 +747,13 @@ def page() -> bytes:
     html = html.replace("<title>VHBR BER モニタ</title>", "<title>VHBR BER × モーション</title>", 1)
     html = html.replace('<div class="cols">', PANEL + '  <div class="cols">', 1)
     html = html.replace("</body>", PANEL_JS + "</body>", 1)
+    # fit() は「ページの先頭から画面の高さ」に図を収める。上にモーションの欄を足したので、
+    # そのままだと ① の図が最小 (0.5 倍) まで縮む。図の欄 (.cols) の先頭から 1 画面ぶんに収める
+    fit_old = "box.getBoundingClientRect().bottom + window.scrollY - (window.innerHeight - 10)"
+    if fit_old not in html:
+        raise RuntimeError("ber_gui.html の fit() が変わっています。motion_ber_gui.py の page() を直してください")
+    html = html.replace(fit_old, "box.getBoundingClientRect().bottom - document.querySelector('.cols')"
+                                 ".getBoundingClientRect().top - (window.innerHeight - 10)", 1)
     # 上の状態表示に「記録の再生」を足す (元は待機 / ライブ / 再生 だけ)
     html = html.replace('{ idle: "待機", live: "ライブ", play: "再生" }',
                         '{ idle: "待機", live: "ライブ", play: "再生", replay: "記録の再生" }', 1)
