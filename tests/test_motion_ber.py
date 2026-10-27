@@ -293,6 +293,18 @@ def test_replay(tmp_path=None):
         assert json.loads(urllib.request.urlopen(url + "/api/replay/pose?t=0.3").read())["frame"] in (530, 531)
         assert urllib.request.urlopen(url + "/api/replay/frame.jpg?t=0.3").read()[:2] == b"\xff\xd8"
         assert post("/api/replay/view", dict(t=0.25)) == dict(ok=True, view=False, cap=1)
+        # ④: 再生している時刻までのフレームで「現在の BER」と累積が出る
+        t_mid = float(r.f_t[100]) + 1e-6                  # 101 枚目のフレームが始まった直後
+        urllib.request.urlopen(url + f"/api/replay/pose?t={t_mid}").read()
+        st = json.loads(urllib.request.urlopen(url + "/api/state?since=0&view=-1").read())
+        want_err = int(np.sum(r.f_err[:101]))
+        assert st["total"] == dict(bits=101 * 600, errors=want_err, frames=101, expected=101)
+        assert st["recent"]["expected"] == 100 and st["recent"]["errors"] == int(np.sum(r.f_err[1:101]))
+        assert len(st["points"]) == 1 and st["points"][0]["errors"] == 249 and st["curve"][0]["bits"] == 150000
+        # 収録より前へ戻ると点が消え、画面には reset が届く
+        urllib.request.urlopen(url + "/api/replay/pose?t=0.05").read()
+        st2 = json.loads(urllib.request.urlopen(url + f"/api/state?since={st['next']}&view=-1").read())
+        assert st2["reset"] and st2["points"] == [] and st2["total"]["expected"] == 0
         assert post("/api/live/start", dict(level_dbm=0))["ok"] is False
         assert post("/api/replay/open", dict(path=str(tmp)))["ok"] is False      # 記録フォルダ以外は開かない
         assert post("/api/replay/close", {})["ok"] and mb.bg.STATE.mode == "idle"

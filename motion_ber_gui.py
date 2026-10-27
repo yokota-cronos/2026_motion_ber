@@ -739,6 +739,34 @@ def replay_view(t: float) -> dict:
         return dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[k]))
 
 
+def replay_ber(r: replay.Replay, t: float) -> None:
+    """④ 現在の BER・BER の推移・レベルごとの BER を、再生している時刻までの記録で作り直す。
+
+    ber_gui の画面はライブと同じ STATE (points / total / fe_hist / curve) を読むので、そこへ入れる。
+    時刻が進むときは点を足すだけ。戻るときは base を進めて、画面に点を全部読み直させる
+    (snapshot() は since < base のとき reset を立てて先頭から返す)。"""
+    nc, nf = r.ber_upto(t)
+    if r.ber_key == (nc, nf):
+        return
+    with bg.STATE.lock:
+        S = bg.STATE
+        if nc < len(S.points):
+            S.base += len(S.points) + 1
+        S.points = list(r.points[:nc])
+        i = nf - 1
+        S.total = dict(bits=int(r.cum_bits[i]) if nf else 0, errors=int(r.cum_errors[i]) if nf else 0,
+                       frames=int(r.cum_frames[i]) if nf else 0, expected=nf)
+        S.fe_hist = r.f_err[:nf][-bg.FRAME_HISTORY:].astype(np.int16)
+        S.npay = r.npay
+        S.curve = {}
+        for p in S.points:
+            key = f"{p['level'] or 0.0:+.1f}"
+            c = S.curve.setdefault(key, dict(level=p["level"] or 0.0, bits=0, errors=0, frames=0, expected=0))
+            for k in ("bits", "errors", "frames", "expected"):
+                c[k] += p[k]
+    r.ber_key = (nc, nf)
+
+
 def page() -> bytes:
     html = (BER_DIR / "instruments" / "ber_gui.html").read_text(encoding="utf-8")
     for anchor in ('<div class="cols">', "</body>"):
@@ -798,6 +826,7 @@ class Handler(bg.Handler):
             return self._send(dict(ok=False, message="記録を開いていません"), code=409)
         t = float(q.get("t", ["0"])[0])
         if u.path == "/api/replay/pose":
+            replay_ber(r, t)                               # ④ も再生している時刻に合わせる
             return self._send(dict(r.pose(t), at=r.at(t)))
         if u.path == "/api/replay/frame.jpg":
             jpg = r.jpeg(t)

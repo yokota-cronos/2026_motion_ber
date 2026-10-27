@@ -86,6 +86,24 @@ class Replay:
         self.f_t = np.array([_float(r["t"]) for r in f])
         self.f_err = np.array([int(r["errors"]) for r in f], np.int64)
 
+        # ④ 現在の BER 用: その時刻までの累積を、フレーム数から O(1) で引けるようにしておく
+        self.npay = int(self.cond.get("payload", 600))
+        ok = self.f_err >= 0
+        self.cum_frames = np.cumsum(ok)
+        self.cum_bits = self.cum_frames * self.npay
+        self.cum_errors = np.cumsum(np.where(ok, self.f_err, 0))
+        # BER の推移の点: ber_log.csv (ライブの画面に出していた値そのもの) を収録の順に
+        self.points = []
+        for c, r in zip(self.caps, _rows(self.dir / "ber_log.csv")):
+            p = {k: _float(r.get(k), None) for k in ("t", "level", "phase", "q", "eye", "peak", "sig_ms",
+                                                    "t_cap", "t_ddc", "t_demod")}
+            p = {k: (None if v is not None and v != v else v) for k, v in p.items()}   # NaN は JSON に書けない
+            p.update(frames=c["frames"], expected=c["expected"], bits=c["bits"], errors=c["errors"], src="replay")
+            if p["t_demod"] is None:
+                p["t_demod"] = 0.0
+            self.points.append(p)
+        self.ber_key = None          # 直近に ④ へ反映した (収録数, フレーム数)
+
         # カメラ
         c = _rows(self.dir / "camera_frames.csv")
         self.tc = np.array([_float(r["t"]) for r in c])
@@ -129,6 +147,11 @@ class Replay:
             j = sel[int(np.clip(np.searchsorted(self.f_t[sel], t, side="right") - 1, 0, sel.size - 1))]
             out.update(frame=int(self.f_k[j]), frame_errors=int(self.f_err[j]))
         return out
+
+    def ber_upto(self, t: float) -> tuple[int, int]:
+        """t までに始まった収録の数と、t までに始まったテストフレームの数。"""
+        return (int(np.searchsorted(self.cap_t0, t, side="right")),
+                int(np.searchsorted(self.f_t, t, side="right")))
 
     def jpeg(self, t: float) -> bytes | None:
         """t 以前で最後に撮れたコマ (縮小した JPEG)。続けて呼ぶと順に読むだけなので速い。"""
