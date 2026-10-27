@@ -232,6 +232,78 @@ def test_camera_stream_and_recording(tmp_path=None):
         srv.shutdown()
 
 
+def test_replay(tmp_path=None):
+    """記録 (モーション・収録 1 回・カメラ) を作り、時刻で引いて同じものが返ること。"""
+    import camera
+    import replay
+    if camera.cv2 is None:
+        return
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    real = camera.cv2.VideoCapture
+    camera.cv2.VideoCapture = FakeCap
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    try:
+        mb.CAMERA.open(0)
+        time.sleep(0.3)
+        log = _session(tmp)
+        t_cap = log.perf0 + 0.2
+        for k in range(60):                               # 0.6 秒ぶん、100 fps
+            mb.MOTION._ingest(log.perf0 + k / 100, 500 + k, k / 100, None, np.full((7, 3), k * 1e-3))
+        st = np.arange(0, 1_000_000, 4000, dtype=np.int64)
+        mb.CAPTURE.update(t0=t_cap, n=10_000_000, fs=100e6, rx_fs=12.5e6,
+                          res=dict(starts=st, status=np.zeros(st.size, int), frame_errors=np.arange(st.size) % 3))
+        log.row(dict(t=0, level=0.0, phase=180.0, frames=250, expected=250, bits=150000, errors=249, q=0.9, eye=0.5),
+                "cap_0001.ad3")                           # .ad3 は無いので raw は空扱いになる
+        time.sleep(0.5)
+        log.close()
+    finally:
+        mb.CAMERA.close()
+        camera.cv2.VideoCapture = real
+    r = replay.Replay(log.dir)
+    assert r.names[0] == "chest" and len(r.caps) == 1 and r.caps[0]["raw"] == ""
+    rows = list(csv.DictReader(open(log.dir / "ber_motion.csv", encoding="utf-8")))
+    assert rows[0]["raw_file"] == "cap_0001.ad3"          # どの .ad3 かが残る
+    p = r.pose(0.305)
+    assert p["frame"] in (530, 531) and p["xyz"][0][0] == round((p["frame"] - 500) * 1e-3, 5)
+    assert r.at(0.1)["cap"] is None                       # 収録の外
+    a = r.at(0.2 + (8 + SKIP_RX) / 12.5e6 + 0.00032 * 8)  # 収録の中のフレーム 8 付近
+    assert a["cap"] == 1 and a["frame"] in (7, 8) and a["frame_errors"] == a["frame"] % 3
+    assert r.has_video and r.jpeg(0.3)[:2] == b"\xff\xd8"
+    m = r.meta()
+    assert m["n_raw"] == 0 and m["duration"] >= 0.59 and m["layout"]["bones"][0][0] == "chest"
+    json.dumps(m)
+    json.dumps(dict(r.pose(0.3), at=r.at(0.25)), allow_nan=False)   # numpy の型も NaN も混ざっていない
+    r.caps[0]["ber"] = float("nan")                       # フレームが 1 枚も取れなかった収録
+    json.dumps(dict(at=r.at(0.25), meta=r.meta()), allow_nan=False)
+    # HTTP: 開く -> 測定の開始を断る -> 閉じる
+    mb.Handler.opts = NS(reader="x", tag="y", payload=600)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), mb.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def post(path, body):
+        req = urllib.request.Request(url + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    try:
+        L = json.loads(urllib.request.urlopen(url + "/api/replay/sessions").read())
+        assert any(s["name"] == log.dir.name for s in L)
+        assert post("/api/replay/open", dict(path=str(log.dir)))["ok"] and mb.bg.STATE.mode == "replay"
+        assert json.loads(urllib.request.urlopen(url + "/api/replay/pose?t=0.3").read())["frame"] in (530, 531)
+        assert urllib.request.urlopen(url + "/api/replay/frame.jpg?t=0.3").read()[:2] == b"\xff\xd8"
+        assert post("/api/replay/view", dict(t=0.25)) == dict(ok=True, view=False, cap=1)
+        assert post("/api/live/start", dict(level_dbm=0))["ok"] is False
+        assert post("/api/replay/open", dict(path=str(tmp)))["ok"] is False      # 記録フォルダ以外は開かない
+        assert post("/api/replay/close", {})["ok"] and mb.bg.STATE.mode == "idle"
+    finally:
+        mb.replay_close()
+        srv.shutdown()
+
+
+SKIP_RX = mb.SKIP
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -38,7 +38,7 @@ import webbrowser
 from datetime import datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
@@ -54,9 +54,13 @@ from gui_view import SKIP  # noqa: E402
 
 import camera  # noqa: E402
 import motion  # noqa: E402
+import replay  # noqa: E402
 import phase_control  # noqa: E402
 
 MOTION = motion.MotionStream()
+REPLAY: replay.Replay | None = None      # 開いている記録 (記録の再生)
+REPLAY_LOCK = threading.Lock()
+_RAW_CACHE: dict = {}                     # .ad3 のパス -> 復調の材料 (直近 2 本)
 CAMERA = camera.Camera()
 CAPTURE: dict = {}            # 直近の収録: t0 [perf], n, fs, rx_fs, res。ワーカースレッドだけが書く
 OPTS = dict(require_motion=True, auto_phase=False, record_video=True)
@@ -141,7 +145,7 @@ class MotionSessionLog(bg.SessionLog):
         self.bcsv.write(",".join(
             ["cap", "t_start", "t_end", "wall_start", "level", "phase", "phase_src", "frames", "expected",
              "bits", "errors", "ber", "q", "eye", "motion_frames", "valid_frac", "opti_frame_first",
-             "opti_frame_last"] + xyz + [f"{n}_dev" for n in self.names]) + "\n")
+             "opti_frame_last"] + xyz + [f"{n}_dev" for n in self.names] + ["raw_file"]) + "\n")
         self.fcsv = open(self.dir / "frames.csv", "w", encoding="utf-8", newline="", buffering=1 << 16)
         self.fcsv.write("cap,frame,t,errors,OptiFrame\n")
         with MOTION.lock:
@@ -161,12 +165,12 @@ class MotionSessionLog(bg.SessionLog):
     def row(self, p: dict, raw_file: str = ""):
         super().row(p, raw_file)
         try:
-            self._joined_row(p)
+            self._joined_row(p, raw_file)
         except Exception as e:                               # noqa: BLE001 (BER の測定は止めない)
             traceback.print_exc()
             MOTION.error = f"突き合わせの記録に失敗: {type(e).__name__}: {e}"
 
-    def _joined_row(self, p: dict) -> None:
+    def _joined_row(self, p: dict, raw_file: str = "") -> None:
         c = dict(CAPTURE)
         r = c.get("res")
         if r is None or "t0" not in c:
@@ -194,6 +198,7 @@ class MotionSessionLog(bg.SessionLog):
                  _f(win[0].frame if win else None, "{}"), _f(win[-1].frame if win else None, "{}")]
         cells += ["" if v != v else f"{v:.6f}" for v in mean.ravel()]
         cells += ["" if v != v else f"{v:.6f}" for v in dev]
+        cells.append(raw_file)                               # この収録の生データ (.ad3)。無ければ空
         self.bcsv.write(",".join(cells) + "\n")
 
         # フレームごと: 時刻 = 収録窓の先頭 + 窓の位置 / 受信部の fs
@@ -278,6 +283,13 @@ PANEL = """
       <label class="chk" title="BER の記録中、記録フォルダに camera.mp4 とコマごとの時刻 camera_frames.csv を残す"><input id="cRec" type="checkbox" checked>カメラも録画</label>
     </div>
     <div class="grp">
+      <div class="t">記録の再生</div>
+      <label title="motion.csv がある記録フォルダ。「生」= 波形まで見られる収録の数（ライブ欄の「生データも記録」を入れて撮ったもの）">記録<select id="rSess" style="max-width:340px"></select></label>
+      <button id="rList" title="一覧を読み直す">↻</button>
+      <button class="go" id="rOpen">開く</button>
+      <button id="rClose">閉じる</button>
+    </div>
+    <div class="grp">
       <label class="chk" title="OFF: OptiTrack を受けていないときは BER の「開始」を断る"><input id="mNoReq" type="checkbox">OptiTrack なしでも開始できる</label>
       <label class="chk" id="mAutoL" title="--phase-model で渡したモデルが、収録ごとに位相差を決める"><input id="mAuto" type="checkbox">位相の自動調整</label>
     </div>
@@ -288,6 +300,20 @@ PANEL = """
       <span id="mErr" style="color:var(--red)"></span>
       <details style="font-size:12px;color:var(--sub)"><summary>受信フレームの構造（marker_id と名前の対応を確かめる）</summary><pre id="mDiag" style="margin:4px 0;white-space:pre-wrap"></pre></details>
     </div>
+  </section>
+  <section class="card" id="rCard" hidden>
+    <h2>記録の再生<small id="rInfo"></small></h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="go" id="rPlay" style="min-width:80px">▶ 再生</button>
+      <label class="chk">速さ<select id="rSpeed"><option value="0.02">×0.02</option><option value="0.1">×0.1</option><option value="0.25">×0.25</option><option value="1" selected>×1</option><option value="2">×2</option></select></label>
+      <label class="chk" title="BER の収録 (0.1 秒) と収録の間 (転送待ち、約 0.5 秒) を飛ばして、収録の中だけを再生する"><input id="rSkip" type="checkbox">収録の中だけ</label>
+      <button id="rPrev" title="前の収録の先頭へ">◀ 収録</button><button id="rNext" title="次の収録の先頭へ">収録 ▶</button>
+      <button id="rFrPrev" title="テストフレーム 1 枚ぶん戻る">◀ フレーム</button><button id="rFrNext" title="テストフレーム 1 枚ぶん進む">フレーム ▶</button>
+      <span id="rTime" style="font-variant-numeric:tabular-nums;font-weight:600"></span>
+    </div>
+    <input id="rSeek" type="range" min="0" max="1" step="any" value="0" style="width:100%;margin:6px 0 0">
+    <canvas id="rTl" style="height:110px;cursor:pointer"></canvas>
+    <div class="note" id="rAt"></div>
   </section>
   <div class="pair" id="mViews">
     <section class="card">
@@ -309,6 +335,9 @@ PANEL_JS = """
 "use strict";
 (() => {
   let groupsFilled = false, layout = null, pose = null, camSeq = null;
+  // 記録の再生の状態。t = 記録開始からの秒 (どのファイルも同じ時計)
+  const R = { open: false, meta: null, t: 0, playing: false, last: 0, drag: false,
+              viewKey: null, viewBusy: false, viewAt: 0, imgBusy: false, imgT: -1 };
   const val = id => document.getElementById(id);
   async function mpost(path, body) {
     const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -317,7 +346,7 @@ PANEL_JS = """
   async function mpoll() {
     try {
       const s = await (await fetch("/api/motion")).json();
-      layout = s.layout;
+      if (!R.open) layout = s.layout;
       if (!groupsFilled) {
         val("mGroup").innerHTML = Object.entries(s.groups).map(([k, v]) => `<option value="${k}">${v}</option>`).join("");
         groupsFilled = true;
@@ -343,10 +372,10 @@ PANEL_JS = """
       // カメラ: 繋ぎ直したら配信を開き直す
       val("cRec").checked = s.record_video;
       val("cOpen").disabled = !c.available;
-      val("cInfo").textContent = !c.available ? "OpenCV がありません" : c.running
+      if (!R.open) val("cInfo").textContent = !c.available ? "OpenCV がありません" : c.running
         ? `カメラ ${c.index}、${c.width}×${c.height}、${c.fps} fps${s.video_recording ? "・録画中" : ""}` : "";
-      const want = c.running ? c.index + ":" + c.width : null;
-      if (want !== camSeq) {
+      const want = R.open ? "replay" : c.running ? c.index + ":" + c.width : null;
+      if (want !== camSeq && !R.open) {
         camSeq = want;
         val("cImg").src = want ? "/api/camera.mjpg?" + Date.now() : "";
         val("cImg").style.display = want ? "" : "none";
@@ -457,7 +486,10 @@ PANEL_JS = """
   }
 
   async function ploop() {
-    try { pose = await (await fetch("/api/motion/pose")).json(); } catch (e) { pose = null; }
+    try {
+      pose = await (await fetch(R.open ? `/api/replay/pose?t=${R.t}` : "/api/motion/pose")).json();
+      if (R.open && pose.at) rShowAt(pose.at);
+    } catch (e) { pose = null; }
     draw();
     setTimeout(ploop, 33);
   }
@@ -471,10 +503,214 @@ PANEL_JS = """
   val("cOpen").onclick = () => mpost("/api/camera/open", { index: +val("cIndex").value });
   val("cClose").onclick = () => mpost("/api/camera/close");
   val("cRec").onchange = () => mpost("/api/motion/options", { record_video: val("cRec").checked });
+  // ------------------------------------------------------------ 記録の再生
+  const fmtT = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(3).padStart(6, "0")}`;
+  const capAt = t => R.meta && R.meta.caps.find(c => c.t0 <= t && t <= c.t1);
+  async function rList() {
+    try {
+      const L = await (await fetch("/api/replay/sessions")).json();
+      val("rSess").innerHTML = L.length ? L.map(s => `<option value="${s.path}">${s.name}（収録 ${s.caps}・生 ${s.raw}${s.video ? "・動画" : ""}）</option>`).join("")
+        : '<option value="">記録がありません</option>';
+    } catch (e) { }
+  }
+  function rSetOpen(meta) {
+    R.open = !!meta; R.meta = meta; R.t = meta && meta.caps.length ? meta.caps[0].t0 : 0; R.playing = false;
+    R.viewKey = null; R.imgT = -1;
+    val("rCard").hidden = !meta;
+    V.c = V.r = null;
+    val("cImg").src = "";
+    if (meta) {
+      layout = meta.layout;
+      val("rSeek").max = meta.duration;
+      val("rInfo").textContent = `${meta.name}　${meta.duration.toFixed(1)} 秒・収録 ${meta.caps.length}（生データ ${meta.n_raw}）・モーション ${meta.motion_frames} フレーム` +
+        `${meta.video ? "・動画あり" : "・動画なし"}　FC/${meta.div}・${meta.level_dbm} dBm・${meta.phase_deg}°`;
+      val("cImg").style.display = meta.video ? "" : "none";
+      val("cNone").style.display = meta.video ? "none" : "";
+      val("cNone").textContent = "この記録には動画がありません";
+      val("cInfo").textContent = meta.video ? "記録の再生" : "";
+    } else {
+      camSeq = null;                     // mpoll がライブの配信に戻す
+      val("cNone").textContent = "カメラは繋がっていません";
+    }
+  }
+  function rShowAt(a) {
+    val("rAt").textContent = a.cap == null ? "収録の外（この時刻には BER がありません。モーションとカメラだけ）"
+      : `収録 #${a.cap}: BER ${a.ber == null ? "—" : a.ber.toExponential(2)}（${a.frames}/${a.expected} フレーム）` +
+        (a.frame != null ? `　フレーム ${a.frame}: ${a.frame_errors < 0 ? "取得失敗" : `誤り ${a.frame_errors} ビット`}` : "") +
+        (a.raw ? "　波形 = ①〜③" : "　（生データなし: 波形は出ません）");
+  }
+  function rSeek(t, pause) {
+    if (!R.meta) return;
+    R.t = Math.max(0, Math.min(R.meta.duration, t));
+    if (pause) R.playing = false;
+  }
+  function rDrawTimeline() {
+    const cv = val("rTl"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    const m = R.meta; if (!m) return;
+    const L = 44, Rr = 10, T = 8, B = 22, d = Math.max(m.duration, 1e-6);
+    const x = t => L + (W - L - Rr) * t / d, y = b => T + (H - T - B) * (1 - (Math.log10(Math.max(b, 1e-6)) + 6) / 6);
+    g.font = "11px system-ui, sans-serif"; g.fillStyle = "#667085"; g.strokeStyle = "#e8ebf0"; g.lineWidth = 1;
+    for (let e = -6; e <= 0; e += 2) { const yy = y(10 ** e); g.beginPath(); g.moveTo(L, yy); g.lineTo(W - Rr, yy); g.stroke(); g.textAlign = "right"; g.fillText(`1e${e}`, L - 4, yy + 4); }
+    const step = [1, 2, 5, 10, 20, 30, 60, 120, 300].find(s => d / s <= 12) || 600;
+    g.textAlign = "center";
+    for (let t = 0; t <= d + 1e-9; t += step) g.fillText(`${t}s`, x(t), H - 6);
+    for (const c of m.caps) {
+      const x0 = x(c.t0), w = Math.max(2, x(c.t1) - x0);
+      g.fillStyle = c.raw ? "#1f77b4" : "#98a2b3";
+      if (c.ber == null || c.errors === 0) { g.fillRect(x0, H - B - 4, w, 4); continue; }
+      const yy = y(c.ber); g.fillRect(x0, yy, w, H - B - yy);
+    }
+    g.strokeStyle = "#d62728"; g.lineWidth = 2; g.beginPath(); g.moveTo(x(R.t), T - 4); g.lineTo(x(R.t), H - B + 2); g.stroke();
+    g.fillStyle = "#667085"; g.textAlign = "left"; g.fillText("BER（青 = 生データあり、灰 = なし）", L + 4, T + 10);
+  }
+  function rUpdate(now) {
+    if (!R.open) return;
+    if (!R.drag) val("rSeek").value = R.t;
+    val("rTime").textContent = `${fmtT(R.t)} / ${fmtT(R.meta.duration)}`;
+    val("rPlay").textContent = R.playing ? "❚❚ 停止" : "▶ 再生";
+    rDrawTimeline();
+    // カメラ: 前のコマを読み終えてから次を頼む (読み込みが自然な間引きになる)
+    if (R.meta.video && !R.imgBusy && Math.abs(R.imgT - R.t) > 1e-4) {
+      R.imgBusy = true; R.imgT = R.t;
+      const img = val("cImg");
+      img.onload = img.onerror = () => { R.imgBusy = false; };
+      img.src = `/api/replay/frame.jpg?t=${R.t}`;
+    }
+    // 波形: 生データのある収録の中で、テストフレームが変わったら復調し直す (再生中は 0.3 秒に 1 回まで)
+    const c = capAt(R.t);
+    if (c && c.raw && !R.viewBusy) {
+      const key = `${c.cap}:${Math.floor((R.t - c.t0) / (R.meta.frame_s || 1e-3))}`;
+      if (key !== R.viewKey && (!R.playing || now - R.viewAt > 300)) {
+        R.viewBusy = true; R.viewAt = now;
+        fetch("/api/replay/view", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ t: R.t }) })
+          .then(r => r.json()).then(j => { R.viewKey = key; if (j.ok === false) val("rAt").textContent = j.message; })
+          .catch(() => { }).finally(() => { R.viewBusy = false; });
+      }
+    }
+  }
+  function rTick(now) {
+    if (R.open && R.playing) {
+      R.t += (now - R.last) / 1000 * +val("rSpeed").value;
+      if (val("rSkip").checked && !capAt(R.t)) {
+        const nx = R.meta.caps.find(c => c.t0 > R.t);
+        if (nx) R.t = nx.t0; else { R.t = R.meta.duration; }
+      }
+      if (R.t >= R.meta.duration) { R.t = R.meta.duration; R.playing = false; }
+    }
+    R.last = now;
+    rUpdate(now);
+    requestAnimationFrame(rTick);
+  }
+  val("rList").onclick = rList;
+  val("rOpen").onclick = async () => { if (!val("rSess").value) return; const j = await mpost("/api/replay/open", { path: val("rSess").value }); if (j.ok) rSetOpen(j.meta); };
+  val("rClose").onclick = async () => { await mpost("/api/replay/close"); rSetOpen(null); };
+  val("rPlay").onclick = () => { if (R.t >= R.meta.duration) R.t = 0; R.playing = !R.playing; };
+  val("rSeek").addEventListener("input", () => { R.drag = true; rSeek(+val("rSeek").value); });
+  val("rSeek").addEventListener("change", () => { R.drag = false; });
+  val("rTl").addEventListener("click", e => {
+    const b = val("rTl").getBoundingClientRect(), L = 44, Rr = 10;
+    rSeek((e.clientX - b.left - L) / (b.width - L - Rr) * R.meta.duration);
+  });
+  val("rPrev").onclick = () => { const c = [...R.meta.caps].reverse().find(c => c.t0 < R.t - 1e-3); if (c) rSeek(c.t0 + 1e-4, true); };
+  val("rNext").onclick = () => { const c = R.meta.caps.find(c => c.t0 > R.t + 1e-6); if (c) rSeek(c.t0 + 1e-4, true); };
+  val("rFrPrev").onclick = () => rSeek(R.t - (R.meta.frame_s || 1e-3), true);
+  val("rFrNext").onclick = () => rSeek(R.t + (R.meta.frame_s || 1e-3), true);
+  rList();
+  fetch("/api/replay/meta").then(r => r.json()).then(m => { if (m) rSetOpen(m); }).catch(() => { });
+  requestAnimationFrame(rTick);
   mpoll(); ploop();
 })();
 </script>
 """
+
+
+# --------------------------------------------------------------------------- 記録の再生
+def replay_open(path: str) -> dict:
+    global REPLAY
+    root = (bg.CAPTURE_ROOT / "log").resolve()     # SessionLog が書く場所と同じ名前を見る
+    d = Path(path).resolve()
+    if d.parent != root or not (d / "motion.csv").exists():
+        raise ValueError(f"再生できるのは {root} の中の記録フォルダだけです: {path}")
+    if bg.STATE.mode not in ("idle", "replay"):
+        raise RuntimeError("測定・再生中は開けません。先に停止してください")
+    r = replay.Replay(d)
+    with REPLAY_LOCK:
+        if REPLAY is not None:
+            REPLAY.close()
+        REPLAY = r
+        _RAW_CACHE.clear()
+    with bg.STATE.lock:
+        bg.STATE.reset()
+        bg.STATE.mode = "replay"
+        # ber_gui.html の poll() は next (= base + 点の数) が 0 だと届いた波形を捨てる。再生では
+        # BER の点を足さないので、base を 1 にして「点が 1 つ流れた後」の扱いにする
+        bg.STATE.base = 1
+    bg.set_status(f"記録の再生: {d.name}", "")
+    return dict(ok=True, meta=r.meta())
+
+
+def replay_close() -> dict:
+    global REPLAY
+    with REPLAY_LOCK:
+        if REPLAY is not None:
+            REPLAY.close()
+        REPLAY = None
+        _RAW_CACHE.clear()
+    with bg.STATE.lock:
+        if bg.STATE.mode == "replay":
+            bg.STATE.mode = "idle"
+    bg.set_status("待機中", "")
+    return dict(ok=True)
+
+
+def _raw_material(path: Path) -> dict:
+    """ber_gui の play_worker と同じ手順で .ad3 を復調の材料にする (2 本まで覚えておく)。"""
+    key = str(path)
+    if key not in _RAW_CACHE:
+        x, _, J = fd.ddc(path, 8)                     # 初回だけ計算して .bb8.npy に置く
+        fs_raw = float(J["sample_rate_hz"])
+        x = np.ascontiguousarray(x[SKIP:])
+        div = int(J["frame"]["div"])
+        rx = fd.receiver_for(J, fs_raw / 8)
+        st, _ = rx.timing(x)
+        while len(_RAW_CACHE) >= 2:
+            _RAW_CACHE.pop(next(iter(_RAW_CACHE)))
+        _RAW_CACHE[key] = dict(x=x, J=J, fs_raw=fs_raw, rx=rx, st=st,
+                               raw=np.memmap(path, dtype="<i2", mode="r"),
+                               vpl=float(J["volts_per_lsb"]), off=float(J.get("offset_v", 0.0)),
+                               ddc_delay=(fd.ddc_taps(fs_raw, div, 8).size - 1) / 2)
+    return _RAW_CACHE[key]
+
+
+def replay_view(t: float) -> dict:
+    """時刻 t のテストフレームを .ad3 から復調して、①〜③ の図 (STATE.latest) を差し替える。"""
+    with REPLAY_LOCK:
+        r = REPLAY
+        if r is None:
+            raise RuntimeError("記録を開いていません")
+        c = r.cap_at(t)
+        if c is None or not c["raw"]:
+            return dict(ok=True, view=False, cap=None if c is None else c["cap"])
+        M = _raw_material(r.dir / c["raw"])
+        rx, st = M["rx"], M["st"]
+        if st.size == 0:
+            return dict(ok=True, view=False, cap=c["cap"], message="この収録ではフレームが見つかりません")
+        # 窓の先頭の時刻 (収録の先頭から) で、t を含むフレームを選ぶ
+        ts = (st + SKIP) / rx.fs
+        k = int(np.clip(np.searchsorted(ts, t - c["t0"], side="right") - 1, 0, st.size - 1))
+        bg.apply_rx_options(rx)
+        res = rx.demod(M["x"], st[k:k + 1], detail=True)
+        r0 = max(0, int((st[k] + SKIP) * 8 - M["ddc_delay"]))
+        view = bg.make_view(M["raw"], M["vpl"], M["off"], M["fs_raw"], M["x"], rx, res, M["ddc_delay"],
+                            spec_from=r0)
+        fe = np.full(res["status"].size, -1, int)
+        fe[res["status"] == 0] = res["frame_errors"]
+        with bg.STATE.lock:
+            bg.STATE.latest.update(view, frame_errors=fe.tolist(), npay=rx.npay)
+            bg.STATE.view_id += 1
+        return dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[0]))
 
 
 def page() -> bytes:
@@ -485,6 +721,9 @@ def page() -> bytes:
     html = html.replace("<title>VHBR BER モニタ</title>", "<title>VHBR BER × モーション</title>", 1)
     html = html.replace('<div class="cols">', PANEL + '  <div class="cols">', 1)
     html = html.replace("</body>", PANEL_JS + "</body>", 1)
+    # 上の状態表示に「記録の再生」を足す (元は待機 / ライブ / 再生 だけ)
+    html = html.replace('{ idle: "待機", live: "ライブ", play: "再生" }',
+                        '{ idle: "待機", live: "ライブ", play: "再生", replay: "記録の再生" }', 1)
     return html.encode("utf-8")
 
 
@@ -494,7 +733,8 @@ def motion_status() -> dict:
     return dict(MOTION.status(), require_motion=OPTS["require_motion"], auto_phase=OPTS["auto_phase"],
                 model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
                 camera=CAMERA.status(), record_video=OPTS["record_video"],
-                video_recording=logging and getattr(s, "video", None) is not None)
+                video_recording=logging and getattr(s, "video", None) is not None,
+                replay=None if REPLAY is None else REPLAY.dir.name)
 
 
 class Handler(bg.Handler):
@@ -510,7 +750,26 @@ class Handler(bg.Handler):
             return self._send(MOTION.pose())
         if u.path == "/api/camera.mjpg":
             return self._mjpeg()
+        if u.path.startswith("/api/replay/"):
+            return self._replay_get(u)
         return super().do_GET()
+
+    def _replay_get(self, u):
+        q = parse_qs(u.query)
+        if u.path == "/api/replay/sessions":
+            return self._send(replay.list_sessions(bg.CAPTURE_ROOT / "log"))
+        r = REPLAY
+        if u.path == "/api/replay/meta":
+            return self._send(None if r is None else r.meta())
+        if r is None:
+            return self._send(dict(ok=False, message="記録を開いていません"), code=409)
+        t = float(q.get("t", ["0"])[0])
+        if u.path == "/api/replay/pose":
+            return self._send(dict(r.pose(t), at=r.at(t)))
+        if u.path == "/api/replay/frame.jpg":
+            jpg = r.jpeg(t)
+            return self._send(jpg, "image/jpeg") if jpg else self._send(b"", "image/jpeg", code=404)
+        return self._send(dict(error="not found"), code=404)
 
     def _mjpeg(self):
         """カメラを MJPEG で流し続ける (<img src> でそのまま見える)。カメラを閉じるか、画面を閉じるまで。"""
@@ -537,10 +796,19 @@ class Handler(bg.Handler):
         try:
             if u.path.startswith(("/api/motion/", "/api/camera/")):
                 return self._send(self._motion(u.path, json.loads(body or b"{}")))
+            if u.path == "/api/replay/open":
+                return self._send(replay_open(str(json.loads(body or b"{}").get("path", ""))))
+            if u.path == "/api/replay/close":
+                return self._send(replay_close())
+            if u.path == "/api/replay/view":
+                return self._send(replay_view(float(json.loads(body or b"{}").get("t", 0.0))))
+            if u.path in ("/api/live/start", "/api/play/start") and REPLAY is not None:
+                return self._send(dict(ok=False, message="記録の再生を閉じてから始めてください"))
             if u.path == "/api/live/start" and OPTS["require_motion"] and not MOTION.receiving():
                 return self._send(dict(ok=False, message="OptiTrack のフレームが来ていません。モーションの欄で接続するか、"
                                                          "「OptiTrack なしでも開始できる」を入れてください"))
             if u.path == "/api/shutdown":
+                replay_close()
                 MOTION.close()
                 CAMERA.close()
         except Exception as e:                             # noqa: BLE001
