@@ -313,6 +313,68 @@ def test_replay(tmp_path=None):
         srv.shutdown()
 
 
+def test_overlay_projection():
+    """較正: 既知のカメラで投影した点から、同じカメラ (位置・向き) が戻ること。"""
+    import cv2
+    import overlay
+    rng = np.random.default_rng(0)
+    X = rng.normal([0, 0, 1.0], [0.25, 0.25, 0.05], size=(300, 3))       # ほぼ 1 枚の面 (体の正面)
+    c = dict(width=640, height=480, focal_px=500.0, rvec=[1.3, -0.4, 0.4], tvec=[0.1, 0.9, 2.5])
+    U = overlay.project(c, X) + rng.normal(0, 1.0, size=(300, 2))
+    r = overlay._fit(X, U, 640, 480, 500.0)
+    assert r["med"] < 2.0 and np.allclose(r["tvec"].ravel(), c["tvec"], atol=0.05)
+    P = overlay.project(dict(c, rvec=r["rvec"].ravel().tolist(), tvec=r["tvec"].ravel().tolist()), X[:5])
+    assert np.abs(P - overlay.project(c, X[:5])).max() < 3.0
+    assert np.isnan(overlay.project(c, np.full((1, 3), np.nan))).all()
+
+
+def test_viewer_endpoints(tmp_path=None):
+    """--replay の画面: 動画に人が写っていなくても落ちず、① ④ の材料と数値が出る。"""
+    import camera
+    if camera.cv2 is None:
+        return
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    real = camera.cv2.VideoCapture
+    camera.cv2.VideoCapture = FakeCap
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    try:
+        mb.CAMERA.open(0)
+        time.sleep(0.3)
+        log = _session(tmp)
+        for k in range(60):
+            mb.MOTION._ingest(log.perf0 + k / 100, 500 + k, k / 100, None, np.full((7, 3), k * 1e-3))
+        st = np.arange(0, 1_000_000, 4000, dtype=np.int64)
+        mb.CAPTURE.update(t0=log.perf0 + 0.2, n=10_000_000, fs=100e6, rx_fs=12.5e6,
+                          res=dict(starts=st, status=np.zeros(st.size, int), frame_errors=np.arange(st.size) % 3))
+        log.row(dict(t=0, level=0.0, phase=180.0, frames=250, expected=250, bits=150000, errors=249, q=0.9, eye=0.5))
+        time.sleep(0.4)
+        log.close()
+    finally:
+        mb.CAMERA.close()
+        camera.cv2.VideoCapture = real
+    mb.Handler.opts = NS(reader="x", tag="y", payload=600)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), mb.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    mb.VIEWER["on"] = True
+    try:
+        mb.replay_open(str(log.dir))
+        assert "記録の再生" in urllib.request.urlopen(url + "/").read().decode("utf-8")
+        p = json.loads(urllib.request.urlopen(url + "/api/replay/panel?t=0.25").read())
+        assert p["view"] is None and p["cap"] == 1                     # 生データが無いので図は無い
+        n = p["numbers"]
+        assert n["cap"]["cap"] == 1 and n["at"]["frame"] is not None and n["recent"]["expected"] > 0
+        o = json.loads(urllib.request.urlopen(url + "/api/replay/overlay?t=0.3").read())
+        assert o["markers"] is None                                      # 較正前 (人が写っていない)
+        req = urllib.request.Request(url + "/api/power", b'{"on": true}', {"Content-Type": "application/json"})
+        assert json.loads(urllib.request.urlopen(req).read())["ok"] is False   # 装置には触らない
+    finally:
+        mb.VIEWER["on"] = False
+        mb.replay_close()
+        srv.shutdown()
+
+
 SKIP_RX = mb.SKIP
 
 

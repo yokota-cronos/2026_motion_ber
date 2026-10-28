@@ -39,6 +39,8 @@ uv run motion_ber_gui.py --connect             # 起動と同時に OptiTrack (1
 uv run motion_ber_gui.py --group lower         # 下半身
 uv run motion_ber_gui.py --fake-motion         # Motive 無し。合成モーションで画面と記録を試す
 uv run motion_ber_gui.py --camera 0            # カメラ 0 も開く（画面の「カメラ」欄からも開ける）
+uv run motion_ber_gui.py --replay              # 記録の再生専用の画面（いちばん新しい記録。装置には触らない）
+uv run motion_ber_gui.py --replay <フォルダ名>  # 記録を指定して再生
 uv run python tests/test_motion_ber.py         # 装置無しで確かめられる部分のテスト
 ```
 
@@ -122,6 +124,36 @@ ADP3250 と Motive は外部トリガで結ばれていない。どちらも PC 
 - 最初の 1 回だけ 1.4 秒ほどかかる（受信部の立ち上げ）。収録を移るたびに 0.15 秒ほど（収録 1 本の復調）、同じ収録の中では 1 フレーム 30 ms 前後。
 - 再生中は BER の測定を始められない（閉じてから）。
 
+### 再生専用の画面（`--replay`）
+
+`uv run motion_ber_gui.py --replay [フォルダ名]` で、再生だけの画面が http://127.0.0.1:8767 に開く
+（測定用の GUI と同時に開ける。ADP3250・電源・OptiTrack・カメラには触らない）。
+
+| 左 | 右 |
+|---|---|
+| 動画に**実測したマーカーの骨格**を重ねたもの。下に再生の操作とタイムライン | 上: ① 送ったビット → タグの信号 → リーダ出力と包絡線 → 判定軸と復調したビット（誤りは赤）<br>下: ③ 復調後の IQ と ④ BER の数値（現在・累積・この収録・このフレーム） |
+
+**動画への重ね方:** カメラと OptiTrack は較正していないので、記録そのものから求める（`overlay.py`）。
+
+1. 動画を 150 コマ間引いて MediaPipe Pose で骨格を取る（初回だけ約 10 秒。`pose_mediapipe.npz` に残す）
+2. マーカーを MediaPipe の点に対応させる: `R_joint` = 右肘、`R_upperarm` = 肩から肘へ 2 割、`R_forearm` = 肘から手首へ 9 割、
+   `chest` = 両肩の中点（下半身は腰・膝・足首で同様）
+3. 同じ時刻の「マーカーの 3D 座標」と「動画上の位置」の組から、カメラの位置と向きを `solvePnP` で求める。
+   焦点距離は C920 の公称値（640×480 で 500 px）に固定、カメラの遅れ（動画とモーションの時刻のずれ）は探す
+4. 以後は各コマの時刻のマーカーをそのカメラで投影して描く（MediaPipe の骨格の代わりに実測の骨格を出す）
+
+結果は `overlay_calib.json`。2026-10-27 の 30 秒の記録では**誤差 8.0 px（中央値）・カメラの遅れ 0.10 s**。
+
+- マーカーは体の正面のほぼ 1 枚の面に並ぶので、焦点距離は記録からは決まらない（探すと上限に張り付いた）。だから公称値に固定している。
+  同じ理由で「正面から」と「左右を入れ替えて背中から」も見分けにくいので、ラベルどおり（`R_*` = 本人の右）を基本にしている。
+- 対応の比（2 割・9 割）は体の寸法からの目安。マーカーの付け方を変えたら `overlay.py` の `MARKER_TO_MP` を直す。
+- 「MediaPipe の骨格」を入れると、較正に使った対応点を白い線で重ねて見られる（コマごとに計算するので少し重い）。
+- 動きの少ない記録ではカメラの遅れがほとんど決まらない。遅れ 0 より 5 % 以上良いときだけ採る。
+- 「較正し直す」で最初からやり直す（`overlay_calib.json` と `pose_mediapipe.npz` を作り直す）。
+
+MediaPipe の姿勢モデル（`models/pose_landmarker_full.task`、約 9 MB）は初回に Google から取ってくる（git には入れない）。
+MediaPipe が `opencv-contrib-python` を求めるので、OpenCV はそちらに替えた（`opencv-python` と同じ `cv2`。両方入れると壊れる）。
+
 ## 位相の自動調整（先々用）
 
 ```bash
@@ -143,6 +175,7 @@ GUI で入れたのと同じ経路で次の収録の前に反映する（`Bridge
 | `motion_ber_gui.py` | 本体: 差し替え、記録（`MotionSessionLog`）、画面の欄、HTTP |
 | `motion.py` | NatNet の受信、ラベル認識、リングバッファ、合成モーション、3D 表示の配色・ボーン |
 | `replay.py` | 記録フォルダを読み、時刻で姿勢・カメラのコマ・収録とフレームを引く（記録の再生） |
+| `replay_viewer.html` / `overlay.py` | 再生専用の画面（`--replay`） ／ 動画にマーカーを重ねるためのカメラの較正（MediaPipe） |
 | `camera.py` | Web カメラ: 画面への MJPEG、記録フォルダへの録画（コマごとの時刻つき） |
 | `phase_control.py` / `phase_model_example.py` | 位相の自動調整の差し込み口とひな形 |
 | `tests/test_motion_ber.py` | 装置無しのテスト |

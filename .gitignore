@@ -6,3 +6,6 @@ __pycache__/
 *.ad3
 *.ad3.json
 *.mp4
+
+# MediaPipe の姿勢モデル (初回に自動で取ってくる)
+models/

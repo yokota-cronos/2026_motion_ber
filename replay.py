@@ -111,7 +111,8 @@ class Replay:
         self.has_video = cv2 is not None and self.tc.size > 0 and self.video_path.exists()
         self.vlock = threading.Lock()
         self.vcap = None
-        self.vpos = -1               # 次に read() すると返るコマ番号 - 1
+        self.vpos = -1               # 直近に読んだコマの番号
+        self.vframe = None
         self.vjpeg = (-1, None)
 
         ends = [a[-1] for a in (self.tm, self.f_t, self.tc) if a.size] + [c["t1"] for c in self.caps[-1:]]
@@ -149,30 +150,56 @@ class Replay:
         return out
 
     def ber_upto(self, t: float) -> tuple[int, int]:
-        """t までに始まった収録の数と、t までに始まったテストフレームの数。"""
-        return (int(np.searchsorted(self.cap_t0, t, side="right")),
-                int(np.searchsorted(self.f_t, t, side="right")))
+        """t までに始まった収録の数と、t までに始まったテストフレームの数。
+
+        収録の先頭と最初のフレームの間 (約 0.4 ms) では、at() と波形は最初のフレームを出すので、
+        数もそのフレームまで入れて揃える。"""
+        nc = int(np.searchsorted(self.cap_t0, t, side="right"))
+        nf = int(np.searchsorted(self.f_t, t, side="right"))
+        c = self.cap_at(t)
+        if c is not None:
+            sel = np.nonzero(self.f_cap == c["cap"])[0]
+            if sel.size and nf <= sel[0]:
+                nf = int(sel[0]) + 1
+        return nc, nf
+
+    def _read(self, k: int):
+        """動画のコマ k (BGR)。self.vlock の中から呼ぶ。続けて読むと順に読むだけなので速い。"""
+        if self.vcap is None:
+            self.vcap = cv2.VideoCapture(str(self.video_path))
+            self.vpos, self.vframe = -1, None
+        if k == self.vpos and self.vframe is not None:
+            return self.vframe
+        if not (self.vpos < k <= self.vpos + 30):          # 戻る / 大きく飛ぶときだけシーク
+            self.vcap.set(cv2.CAP_PROP_POS_FRAMES, k)
+            self.vpos = k - 1
+        f = None
+        while self.vpos < k:
+            ok, f = self.vcap.read()
+            if not ok:
+                return None
+            self.vpos += 1
+        self.vframe = f
+        return f
+
+    def frame_bgr(self, k: int):
+        if not self.has_video:
+            return None
+        with self.vlock:
+            f = self._read(int(np.clip(k, 0, self.tc.size - 1)))
+            return None if f is None else f.copy()
 
     def jpeg(self, t: float) -> bytes | None:
-        """t 以前で最後に撮れたコマ (縮小した JPEG)。続けて呼ぶと順に読むだけなので速い。"""
+        """t 以前で最後に撮れたコマ (縮小した JPEG)。"""
         if not self.has_video:
             return None
         k = int(np.clip(np.searchsorted(self.tc, t, side="right") - 1, 0, self.tc.size - 1))
         with self.vlock:
             if self.vjpeg[0] == k:
                 return self.vjpeg[1]
-            if self.vcap is None:
-                self.vcap = cv2.VideoCapture(str(self.video_path))
-                self.vpos = -1
-            if not (self.vpos < k <= self.vpos + 30):          # 戻る / 大きく飛ぶときだけシーク
-                self.vcap.set(cv2.CAP_PROP_POS_FRAMES, k)
-                self.vpos = k - 1
-            f = None
-            while self.vpos < k:
-                ok, f = self.vcap.read()
-                if not ok:
-                    return self.vjpeg[1]
-                self.vpos += 1
+            f = self._read(k)
+            if f is None:
+                return self.vjpeg[1]
             h, w = f.shape[:2]
             if w > STREAM_WIDTH:
                 f = cv2.resize(f, (STREAM_WIDTH, int(h * STREAM_WIDTH / w)), interpolation=cv2.INTER_AREA)

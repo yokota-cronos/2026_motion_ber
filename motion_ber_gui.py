@@ -50,16 +50,18 @@ sys.path.insert(0, str(BER_DIR))
 import ber_gui as bg  # noqa: E402
 import bench  # noqa: E402
 import fast_demod as fd  # noqa: E402
-from gui_view import SKIP  # noqa: E402
+from gui_view import SKIP, build_view  # noqa: E402
 
 import camera  # noqa: E402
 import motion  # noqa: E402
+import overlay  # noqa: E402
 import replay  # noqa: E402
 import phase_control  # noqa: E402
 
 MOTION = motion.MotionStream()
 REPLAY: replay.Replay | None = None      # 開いている記録 (記録の再生)
 REPLAY_LOCK = threading.Lock()
+VIEWER = dict(on=False, calib=None, status="")    # --replay で開く再生用の画面と、動画への重ね合わせの較正
 _RAW_CACHE: dict = {}                     # .ad3 のパス -> 復調の材料 (直近 2 本)
 CAMERA = camera.Camera()
 CAPTURE: dict = {}            # 直近の収録: t0 [perf], n, fs, rx_fs, res。ワーカースレッドだけが書く
@@ -713,30 +715,63 @@ def _one_frame(res: dict, fe: np.ndarray, k: int) -> dict:
     return out
 
 
-def replay_view(t: float) -> dict:
-    """時刻 t のテストフレームを .ad3 から復調して、①〜③ の図 (STATE.latest) を差し替える。"""
+def replay_frame_view(t: float, span_us: float | None = None) -> tuple[dict | None, dict]:
+    """時刻 t のテストフレームを .ad3 から復調して、gui_view.build_view の図の材料を返す。
+
+    返り値: (図の材料 or None, 情報)。収録の外・生データの無い収録では図は None。"""
     with REPLAY_LOCK:
         r = REPLAY
         if r is None:
             raise RuntimeError("記録を開いていません")
         c = r.cap_at(t)
         if c is None or not c["raw"]:
-            return dict(ok=True, view=False, cap=None if c is None else c["cap"])
+            return None, dict(ok=True, view=False, cap=None if c is None else c["cap"])
         M = _demod_all(_raw_material(r.dir / c["raw"]))
         rx, st, fe = M["rx"], M["st"], M["fe"]
         if st.size == 0:
-            return dict(ok=True, view=False, cap=c["cap"], message="この収録ではフレームが見つかりません")
+            return None, dict(ok=True, view=False, cap=c["cap"], message="この収録ではフレームが見つかりません")
         # 窓の先頭の時刻 (収録の先頭から) で、t を含むフレームを選ぶ。frames.csv と同じ式
         ts = (st + SKIP) / rx.fs
         k = int(np.clip(np.searchsorted(ts, t - c["t0"], side="right") - 1, 0, st.size - 1))
         res = _one_frame(M["res"], fe, k)
         r0 = max(0, int((st[k] + SKIP) * M["decim"] - M["ddc_delay"]))
-        view = bg.make_view(M["raw"], M["vpl"], M["off"], M["fs_raw"], M["x"], rx, res, M["ddc_delay"],
-                            spec_from=r0)
+        S = bg.STATE
+        view = build_view(M["raw"], M["vpl"], M["off"], M["fs_raw"], M["x"], rx, res,
+                          span_us or S.span_us, M["ddc_delay"], spec_from=r0, err_focus=S.view_mode == "error",
+                          start_bit=S.next_start_bit(advance=False), spec_span_mhz=S.spec_span_mhz)
+        return view, dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[k]),
+                          npay=rx.npay)
+
+
+def replay_view(t: float) -> dict:
+    """時刻 t のテストフレームの図で、元の画面の ①〜③ (STATE.latest) を差し替える。"""
+    view, info = replay_frame_view(t)
+    if view is not None:
         with bg.STATE.lock:
-            bg.STATE.latest.update(view, frame_errors=[int(fe[k])], npay=rx.npay)
+            bg.STATE.latest.update(view, frame_errors=[info["errors"]], npay=info["npay"])
             bg.STATE.view_id += 1
-        return dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[k]))
+    info.pop("npay", None)
+    return info
+
+
+def replay_numbers(r: replay.Replay, t: float, n_recent: int = 100) -> dict:
+    """再生用の画面の ④: その時刻までの数値だけ。"""
+    nc, nf = r.ber_upto(t)
+    ber = lambda e, b: None if b == 0 else e / b
+    i = nf - 1
+    tot_b = int(r.cum_bits[i]) if nf else 0
+    tot_e = int(r.cum_errors[i]) if nf else 0
+    tail = r.f_err[max(0, nf - n_recent):nf]
+    got = tail[tail >= 0]
+    rec_b, rec_e = int(got.size) * r.npay, int(got.sum())
+    c = r.cap_at(t)
+    return dict(recent=dict(ber=ber(rec_e, rec_b), errors=rec_e, bits=rec_b, frames=int(got.size), expected=int(tail.size)),
+                total=dict(ber=ber(tot_e, tot_b), errors=tot_e, bits=tot_b, frames=int(r.cum_frames[i]) if nf else 0,
+                           expected=nf),
+                cap=None if c is None else dict(cap=c["cap"], ber=None if c["ber"] != c["ber"] else c["ber"],
+                                                errors=c["errors"], bits=c["bits"], frames=c["frames"],
+                                                expected=c["expected"], level=c["level"], phase=c["phase"]),
+                at=r.at(t), npay=r.npay)
 
 
 def replay_ber(r: replay.Replay, t: float) -> None:
@@ -765,6 +800,66 @@ def replay_ber(r: replay.Replay, t: float) -> None:
             for k in ("bits", "errors", "frames", "expected"):
                 c[k] += p[k]
     r.ber_key = (nc, nf)
+
+
+def viewer_calibrate(force: bool = False) -> None:
+    """開いている記録で、動画にマーカーを重ねるための較正をする (別スレッド)。"""
+    r = REPLAY
+    if r is None:
+        return
+
+    def run():
+        VIEWER.update(calib=None, status="較正の準備中")
+        try:
+            c = overlay.calibrate(r, lambda m: VIEWER.update(status=m), force=force)
+            VIEWER.update(calib=c if c.get("ok") else None,
+                          status="" if c.get("ok") else c.get("message", "較正できません"))
+        except Exception as e:                             # noqa: BLE001 (画面は使える)
+            traceback.print_exc()
+            VIEWER.update(calib=None, status=f"較正できません: {type(e).__name__}: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def viewer_overlay(r: replay.Replay, t: float, with_mp: bool) -> dict:
+    """時刻 t に出す動画のコマに重ねる点 [px]: マーカー (較正で投影) と、必要なら MediaPipe の骨格。"""
+    c = VIEWER["calib"]
+    out = dict(w=None, h=None, markers=None, mp=None, status=VIEWER["status"],
+               calib=None if c is None else {k: c[k] for k in ("rms_px", "median_px", "lag_s", "focal_px", "lr_swapped")})
+    if not r.has_video:
+        return out
+    k = int(np.clip(np.searchsorted(r.tc, t, side="right") - 1, 0, r.tc.size - 1))
+    if c is not None:
+        out.update(w=c["width"], h=c["height"])
+        tq = r.tc[k] - c["lag_s"]                          # このコマを撮った時刻のモーション
+        i = int(np.clip(np.searchsorted(r.tm, tq), 0, r.tm.size - 1))
+        if i > 0 and abs(r.tm[i - 1] - tq) < abs(r.tm[i] - tq):
+            i -= 1
+        P = overlay.project(c, r.xyz[i])
+        out["markers"] = {n: (None if np.isnan(P[j]).any() else [round(float(v), 1) for v in P[j]])
+                          for j, n in enumerate(r.names)}
+    if with_mp:
+        out["mp"] = viewer_mediapipe(r, k)
+    return out
+
+
+_MP = dict(det=None, cache={})
+
+
+def viewer_mediapipe(r: replay.Replay, k: int):
+    """動画のコマ k の MediaPipe の骨格 (見えている点だけ)。コマごとに覚えておく。"""
+    key = (str(r.dir), k)
+    if key not in _MP["cache"]:
+        if _MP["det"] is None:
+            _MP["det"] = overlay.PoseDetector()
+        frame = r.frame_bgr(k)
+        lm = None if frame is None else _MP["det"].detect(frame)
+        _MP["cache"][key] = None if lm is None else [None if p[2] < overlay.VIS_MIN else [round(float(p[0]), 1),
+                                                                                          round(float(p[1]), 1)]
+                                                      for p in lm]
+        if len(_MP["cache"]) > 3000:
+            _MP["cache"].pop(next(iter(_MP["cache"])))
+    return dict(points=_MP["cache"][key], edges=overlay.MP_EDGES)
 
 
 def page() -> bytes:
@@ -804,6 +899,8 @@ class Handler(bg.Handler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/":
+            if VIEWER["on"]:
+                return self._send((HERE / "replay_viewer.html").read_bytes(), "text/html")
             return self._send(page(), "text/html")
         if u.path == "/api/motion":
             return self._send(motion_status())
@@ -828,6 +925,14 @@ class Handler(bg.Handler):
         if u.path == "/api/replay/pose":
             replay_ber(r, t)                               # ④ も再生している時刻に合わせる
             return self._send(dict(r.pose(t), at=r.at(t)))
+        if u.path == "/api/replay/panel":
+            span = float(q["span"][0]) if "span" in q else None
+            view, info = replay_frame_view(t, span)
+            return self._send(dict(info, view=None if view is None else
+                                   {k: view[k] for k in ("wave", "stages", "const") if k in view},
+                                   numbers=replay_numbers(r, t, int(q.get("n", ["100"])[0]))))
+        if u.path == "/api/replay/overlay":
+            return self._send(viewer_overlay(r, t, q.get("mp", ["0"])[0] == "1"))
         if u.path == "/api/replay/frame.jpg":
             jpg = r.jpeg(t)
             return self._send(jpg, "image/jpeg") if jpg else self._send(b"", "image/jpeg", code=404)
@@ -859,11 +964,19 @@ class Handler(bg.Handler):
             if u.path.startswith(("/api/motion/", "/api/camera/")):
                 return self._send(self._motion(u.path, json.loads(body or b"{}")))
             if u.path == "/api/replay/open":
-                return self._send(replay_open(str(json.loads(body or b"{}").get("path", ""))))
+                out = replay_open(str(json.loads(body or b"{}").get("path", "")))
+                if VIEWER["on"]:
+                    viewer_calibrate()
+                return self._send(out)
+            if u.path == "/api/replay/calibrate":
+                viewer_calibrate(force=True)
+                return self._send(dict(ok=True))
             if u.path == "/api/replay/close":
                 return self._send(replay_close())
             if u.path == "/api/replay/view":
                 return self._send(replay_view(float(json.loads(body or b"{}").get("t", 0.0))))
+            if u.path in ("/api/live/start", "/api/play/start", "/api/power") and VIEWER["on"]:
+                return self._send(dict(ok=False, message="再生用の画面 (--replay) では装置を使いません"))
             if u.path in ("/api/live/start", "/api/play/start") and REPLAY is not None:
                 return self._send(dict(ok=False, message="記録の再生を閉じてから始めてください"))
             if u.path == "/api/live/start" and OPTS["require_motion"] and not MOTION.receiving():
@@ -944,8 +1057,12 @@ def main() -> int:
     ap.add_argument("--fake-motion", action="store_true", help="起動時に合成モーションを流す (Motive 無しの試験用)")
     ap.add_argument("--camera", type=int, metavar="N", help="起動時にカメラ N を開く (0 = 内蔵のことが多い)")
     ap.add_argument("--phase-model", help="predict_phase(motion) を持つ .py (phase_control.py 参照)")
+    ap.add_argument("--replay", nargs="?", const="latest", metavar="FOLDER",
+                    help="記録の再生用の画面で開く (装置には触らない)。FOLDER を省くといちばん新しい記録")
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args()
+    if a.replay:
+        return main_viewer(a)
 
     bg.DEFAULT_DIV = a.div
     bg.STATE.live["div"] = a.div
@@ -989,6 +1106,53 @@ def main() -> int:
         bg.stop()
         MOTION.close()
         CAMERA.close()
+    return 0
+
+
+def main_viewer(a) -> int:
+    """--replay: 記録の再生専用の画面。ADP3250・電源・OptiTrack・カメラには触らない。
+
+    左に動画とマーカーの骨格 (MediaPipe で較正して重ねる)、右に ① と ③・④ を出す。"""
+    VIEWER["on"] = True
+    bg.power_read = lambda max_age=1.0: dict(ok=False, on=None, rails=[], message="再生用の画面では電源を見ない")
+    root = bg.CAPTURE_ROOT / "log"
+    if a.replay == "latest":
+        L = replay.list_sessions(root)
+        if not L:
+            print(f"記録がありません: {root}", flush=True)
+            return 1
+        folder = L[0]["path"]
+    else:
+        folder = a.replay if Path(a.replay).is_absolute() else str(root / a.replay)
+    fd.load_kernel()
+    replay_open(folder)
+    viewer_calibrate()
+
+    def warm():                                          # 受信部の立ち上げ (初回 1 秒強) を先に済ませる
+        try:
+            if REPLAY is not None and REPLAY.caps:
+                replay_frame_view(REPLAY.caps[0]["t0"])
+        except Exception:                                # noqa: BLE001
+            traceback.print_exc()
+
+    threading.Thread(target=warm, daemon=True).start()
+    Handler.opts = a
+    port = a.port if a.port != 8766 else 8767           # 測定用の GUI と同時に開けるように
+    try:
+        srv = Server(("127.0.0.1", port), Handler)
+    except OSError as e:
+        print(f"ポート {port} を開けません (再生用の画面がもう開いていませんか): {e}", flush=True)
+        return 1
+    url = f"http://127.0.0.1:{port}/"
+    print(f"記録の再生: {Path(folder).name}\n  {url}   (Ctrl-C で終了)", flush=True)
+    if not a.no_browser:
+        threading.Timer(0.5, webbrowser.open, args=(url,)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        replay_close()
     return 0
 
 
