@@ -383,6 +383,49 @@ def test_viewer_endpoints(tmp_path=None):
         srv.shutdown()
 
 
+def test_fix_lr_flips(tmp_path=None):
+    """途中で左右が入れ替わった記録を、入れ替わった後ろだけ直し、--undo で戻せること。"""
+    import fix_lr
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    log = _session(tmp)
+    names = list(mb.MOTION.names)                     # chest, R_upperarm, L_upperarm, R_joint, R_forearm, L_forearm, L_joint
+    R, L = names.index("R_joint"), names.index("L_joint")
+    for k in range(100):                              # 0.5 s で右と左が入れ替わる
+        xyz = np.zeros((7, 3))
+        xyz[:, 2] = 1.0
+        for n in names:
+            if n.startswith("R_"):
+                xyz[names.index(n), 0] = -0.2
+            elif n.startswith("L_"):
+                xyz[names.index(n), 0] = +0.2
+        if k >= 50:
+            for a, b in (("R_upperarm", "L_upperarm"), ("R_joint", "L_joint"), ("R_forearm", "L_forearm")):
+                ia, ib = names.index(a), names.index(b)
+                xyz[[ia, ib]] = xyz[[ib, ia]]
+        mb.MOTION._ingest(log.perf0 + k / 100, 1000 + k, k / 100, None, xyz)
+    st = np.arange(0, 100_000, 4000, dtype=np.int64)
+    mb.CAPTURE.update(t0=log.perf0 + 0.6, n=1_000_000, fs=100e6, rx_fs=12.5e6,
+                      res=dict(starts=st, status=np.zeros(st.size, int), frame_errors=np.zeros(st.size, int)))
+    log.row(dict(t=0, level=0.0, phase=180.0, frames=st.size, expected=st.size, bits=st.size * 600, errors=0, q=1, eye=1))
+    log.close()
+    d = log.dir
+    flips = fix_lr.detect_flips(d)
+    assert all(abs(v[0] - 0.5) < 0.011 for v in flips.values() if v) and len([v for v in flips.values() if v]) == 3
+    before = (d / "motion.csv").read_text(encoding="utf-8")
+    fix_lr.repair_flips(d)
+    m = list(csv.DictReader(open(d / "motion.csv", encoding="utf-8")))
+    assert all(float(r["R_joint_X"]) == -0.2 and float(r["L_joint_X"]) == 0.2 for r in m)   # 全部始めの割り当て
+    b = list(csv.DictReader(open(d / "ber_motion.csv", encoding="utf-8")))
+    assert float(b[0]["R_joint_X"]) == -0.2 and float(b[0]["R_joint_dev"]) == 0.0          # 収録窓 (後半) も直る
+    assert fix_lr.detect_flips(d) == {k: [] for k in flips}
+    fix_lr.fix(d)                                     # 続けて名前の入れ替えもかけられる
+    assert json.loads((d / "motion_conditions.json").read_text(encoding="utf-8"))["marker_names"][1] == "L_upperarm"
+    fix_lr.undo(d)                                    # どちらも、いちばん元に戻る
+    assert (d / "motion.csv").read_text(encoding="utf-8") == before
+
+
 SKIP_RX = mb.SKIP
 
 
