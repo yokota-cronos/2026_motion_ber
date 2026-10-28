@@ -13,6 +13,9 @@
   header h1 { font-size:15px; margin:0; font-weight:600; white-space:nowrap; }
   header select { max-width:420px; min-width:0; }
   #calib { font-size:12px; opacity:.85; margin-left:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lang { display:inline-flex; border:1px solid #475467; border-radius:6px; overflow:hidden; flex:none; }
+  .lang button { border:0; border-radius:0; padding:2px 9px; background:transparent; color:#cfd4dc; font-size:12px; }
+  .lang button.on { background:#475467; color:#fff; }
   /* 1 画面に収める: 画面の高さから見出しを引いた残りを、左右の列で分ける */
   main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; padding:8px 12px; }
   .col { display:flex; flex-direction:column; gap:8px; min-height:0; min-width:0; }
@@ -41,30 +44,31 @@
 </head>
 <body>
 <header>
-  <h1>記録の再生</h1>
-  <select id="sess" title="記録フォルダ（~/nfc_vhbr_captures/log/）"></select>
-  <button id="open">開く</button>
+  <h1 data-i18n="title">記録の再生</h1>
+  <select id="sess" data-i18n-title="sessTitle"></select>
+  <button id="open" data-i18n="open">開く</button>
   <span id="calib"></span>
+  <span class="lang" title="表示言語 / Language"><button id="langJP">JP</button><button id="langEN">EN</button></span>
 </header>
 <main>
   <div class="col">
     <section class="card grow">
-      <h2>動画とマーカー<small id="vidInfo"></small></h2>
+      <h2><span data-i18n="video">動画とマーカー</span><small id="vidInfo"></small></h2>
       <div class="fill"><canvas id="vid"></canvas></div>
       <div class="bar" style="margin-top:4px">
-        <label class="chk" title="OptiTrack のマーカーを、較正したカメラで動画に投影した骨格"><input id="showMk" type="checkbox" checked>マーカーの骨格</label>
-        <label class="chk" title="MediaPipe が動画から取った骨格（較正に使った対応点）。コマごとに計算するので少し重い"><input id="showMp" type="checkbox">MediaPipe の骨格</label>
-        <label class="chk"><input id="showNm" type="checkbox">マーカー名</label>
-        <button id="recal" title="MediaPipe でカメラを較正し直す">較正し直す</button>
+        <label class="chk" data-i18n-title="showMkTitle"><input id="showMk" type="checkbox" checked><span data-i18n="showMk">マーカーの骨格</span></label>
+        <label class="chk" data-i18n-title="showMpTitle"><input id="showMp" type="checkbox"><span data-i18n="showMp">MediaPipe の骨格</span></label>
+        <label class="chk"><input id="showNm" type="checkbox"><span data-i18n="showNm">マーカー名</span></label>
+        <button id="recal" data-i18n="recal" data-i18n-title="recalTitle">較正し直す</button>
       </div>
     </section>
     <section class="card" style="flex:none">
       <div class="bar">
         <button class="go" id="play" style="min-width:80px">▶ 再生</button>
-        <label class="chk">速さ<select id="speed"><option value="0.02">×0.02</option><option value="0.1">×0.1</option><option value="0.25">×0.25</option><option value="1" selected>×1</option><option value="2">×2</option></select></label>
-        <label class="chk" title="BER の収録 (0.1 秒) と収録の間 (転送待ち) を飛ばして、収録の中だけを再生する"><input id="skip" type="checkbox">収録の中だけ</label>
-        <button id="capPrev">◀ 収録</button><button id="capNext">収録 ▶</button>
-        <button id="frPrev">◀ フレーム</button><button id="frNext">フレーム ▶</button>
+        <label class="chk"><span data-i18n="speed">速さ</span><select id="speed"><option value="0.02">×0.02</option><option value="0.1">×0.1</option><option value="0.25">×0.25</option><option value="1" selected>×1</option><option value="2">×2</option></select></label>
+        <label class="chk" data-i18n-title="skipTitle"><input id="skip" type="checkbox"><span data-i18n="skip">収録の中だけ</span></label>
+        <button id="capPrev" data-i18n="capPrev">◀ 収録</button><button id="capNext" data-i18n="capNext">収録 ▶</button>
+        <button id="frPrev" data-i18n="frPrev">◀ フレーム</button><button id="frNext" data-i18n="frNext">フレーム ▶</button>
         <span id="time"></span>
       </div>
       <input id="seek" type="range" min="0" max="1" step="any" value="0">
@@ -73,12 +77,12 @@
   </div>
   <div class="col">
     <section class="card" style="flex:1.15">
-      <h2>① 送ったビット → リーダ出力 → 復調したビット<small id="waveInfo"></small><span style="margin-left:auto"></span>
-        <label class="chk">表示幅<select id="span"><option value="10" selected>10 µs</option><option value="20">20 µs</option><option value="50">50 µs</option></select></label></h2>
+      <h2><span data-i18n="wave">① 送ったビット → リーダ出力 → 復調したビット</span><small id="waveInfo"></small><span style="margin-left:auto"></span>
+        <label class="chk"><span data-i18n="span">表示幅</span><select id="span"><option value="10" selected>10 µs</option><option value="20">20 µs</option><option value="50">50 µs</option></select></label></h2>
       <div class="fill"><canvas id="wave"></canvas></div>
     </section>
     <div class="pair" style="flex:1">
-      <section class="card"><h2>③ 復調後の IQ<small id="constInfo"></small></h2><div class="fill"><canvas id="iq"></canvas></div></section>
+      <section class="card"><h2><span data-i18n="iq">③ 復調後の IQ</span><small id="constInfo"></small></h2><div class="fill"><canvas id="iq"></canvas></div></section>
       <section class="card"><h2>④ BER</h2><div class="nums" id="nums"></div></section>
     </div>
   </div>
@@ -93,6 +97,89 @@ const sup = e => String(e).split("").map(c => "⁻⁰¹²³⁴⁵⁶⁷⁸⁹"["
 const sci = v => { if (v == null) return "—"; if (v === 0) return "0"; const e = Math.floor(Math.log10(v)); return `${(v / 10 ** e).toFixed(2)}×10${sup(e)}`; };
 const fmtT = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(3).padStart(6, "0")}`;
 const capAt = t => R.meta && R.meta.caps.find(c => c.t0 <= t && t <= c.t1);
+
+// ---------------------------------------------------------------- 表示言語 (JP / EN)
+// 文言はすべてここ。関数のものは数を差し込む。HTML は data-i18n (中身) / data-i18n-title (title) で引く
+const I18N = {
+  jp: {
+    title: "記録の再生", open: "開く", sessTitle: "記録フォルダ（~/nfc_vhbr_captures/log/）",
+    video: "動画とマーカー", showMk: "マーカーの骨格", showMp: "MediaPipe の骨格", showNm: "マーカー名",
+    showMkTitle: "OptiTrack のマーカーを、較正したカメラで動画に投影した骨格",
+    showMpTitle: "MediaPipe が動画から取った骨格（較正に使った対応点）。コマごとに計算するので少し重い",
+    recal: "較正し直す", recalTitle: "MediaPipe でカメラを較正し直す",
+    speed: "速さ", skip: "収録の中だけ", skipTitle: "BER の収録 (0.1 秒) と収録の間 (転送待ち) を飛ばして、収録の中だけを再生する",
+    capPrev: "◀ 収録", capNext: "収録 ▶", frPrev: "◀ フレーム", frNext: "フレーム ▶", play: "▶ 再生", pause: "❚❚ 停止",
+    wave: "① 送ったビット → リーダ出力 → 復調したビット", span: "表示幅", iq: "③ 復調後の IQ",
+    sessOpt: (s) => `${s.name}（収録 ${s.caps}・生 ${s.raw}${s.video ? "・動画" : ""}）`,
+    vidInfo: (m) => `${m.duration.toFixed(1)} 秒・収録 ${m.caps.length}（生データ ${m.n_raw}）・FC/${m.div}・${m.level_dbm} dBm・${m.phase_deg}°`,
+    docTitle: (n) => `記録の再生 — ${n}`,
+    noVideo: "この記録には動画がありません", missing: "見えていない: ", loading: "読み込み中…",
+    calib: (c) => `較正: 誤差 ${c.median_px} px（中央値）・カメラの遅れ ${c.lag_s} s`,
+    noRaw: "この収録には生データがありません（波形は出ません）", beforeFirst: "最初の収録の前です（BER と波形は最初の収録から）",
+    reader: "リーダ出力 [mV]", sent: "送ったビット", got: "復調したビット",
+    waveAxis: (b, T) => `時間 [µs]（ペイロードの ${b} ビット目から ${T} µs。橙 = リーダ出力、黒 = 包絡線、赤い列 = 誤ったビット）`,
+    waveInfo: (P, e, n) => `収録 #${P.cap}・フレーム ${P.frame}：誤り ${e} / ${n} ビット`,
+    held: "（次の収録まで、この収録の最後のフレームを表示）",
+    iAxis: "I（判定軸）", constInfo: (evm) => `赤 = 誤り、EVM ${evm} %`,
+    recent: (n) => `現在の BER<br><span class="note">直近 ${n} フレーム</span>`, total: "累積 BER",
+    thisCap: "この収録", prevCap: "直前の収録", frames: (a, b) => `（${a}/${b} フレーム）`, beforeFirstShort: "最初の収録の前",
+    thisFrame: "このフレーム", lost: "取得失敗", errs: (e, n) => `誤り ${e} / ${n}`, levelPhase: "レベル・位相差",
+    timeline: "収録ごとの BER（青 = 生データあり。クリックでその時刻へ）",
+  },
+  en: {
+    title: "Replay", open: "Open", sessTitle: "Recording folder (~/nfc_vhbr_captures/log/)",
+    video: "Video and markers", showMk: "Marker skeleton", showMp: "MediaPipe skeleton", showNm: "Marker names",
+    showMkTitle: "OptiTrack markers projected onto the video with the calibrated camera",
+    showMpTitle: "Skeleton detected by MediaPipe (the points used for calibration). Computed per frame, so a little slow",
+    recal: "Recalibrate", recalTitle: "Calibrate the camera again with MediaPipe",
+    speed: "Speed", skip: "Captures only", skipTitle: "Skip the gaps between BER captures (USB transfer) and play only inside captures",
+    capPrev: "◀ Capture", capNext: "Capture ▶", frPrev: "◀ Frame", frNext: "Frame ▶", play: "▶ Play", pause: "❚❚ Pause",
+    wave: "① Sent bits → reader output → demodulated bits", span: "Span", iq: "③ IQ after demodulation",
+    sessOpt: (s) => `${s.name} (${s.caps} captures, ${s.raw} raw${s.video ? ", video" : ""})`,
+    vidInfo: (m) => `${m.duration.toFixed(1)} s · ${m.caps.length} captures (${m.n_raw} raw) · FC/${m.div} · ${m.level_dbm} dBm · ${m.phase_deg}°`,
+    docTitle: (n) => `Replay — ${n}`,
+    noVideo: "No video in this recording", missing: "Not visible: ", loading: "Loading…",
+    calib: (c) => `Calibration: error ${c.median_px} px (median) · camera lag ${c.lag_s} s`,
+    noRaw: "No raw data in this capture (no waveform)", beforeFirst: "Before the first capture (BER and waveforms start there)",
+    reader: "Reader output [mV]", sent: "Sent bits", got: "Demodulated",
+    waveAxis: (b, T) => `Time [µs] (${T} µs from payload bit ${b}. Orange = reader output, black = envelope, red columns = bit errors)`,
+    waveInfo: (P, e, n) => `Capture #${P.cap} · frame ${P.frame}: ${e} / ${n} bit errors`,
+    held: " (showing the last frame of this capture until the next one)",
+    iAxis: "I (decision axis)", constInfo: (evm) => `red = error, EVM ${evm} %`,
+    recent: (n) => `Current BER<br><span class="note">last ${n} frame${n === 1 ? "" : "s"}</span>`, total: "Cumulative BER",
+    thisCap: "This capture", prevCap: "Previous capture", frames: (a, b) => `(${a}/${b} frames)`, beforeFirstShort: "before the first capture",
+    thisFrame: "This frame", lost: "not acquired", errs: (e, n) => `${e} / ${n} errors`, levelPhase: "Level · phase",
+    timeline: "BER per capture (blue = raw data saved; click to jump)",
+  },
+};
+// 較正の途中でサーバが返す文言 (日本語) を英語にする
+const STATUS_EN = [
+  [/^MediaPipe で骨格を取っています (\d+)\/(\d+)/, (m) => `Detecting pose with MediaPipe ${m[1]}/${m[2]}`],
+  [/^MediaPipe を準備しています/, () => "Preparing MediaPipe (downloads the model the first time)"],
+  [/^カメラの位置と向きを探しています/, () => "Solving the camera position and orientation"],
+  [/^較正の準備中/, () => "Preparing calibration"],
+  [/^MediaPipe が人を見つけたコマが少なすぎます/, () => "MediaPipe found a person in too few frames"],
+  [/^マーカーと MediaPipe の点の組が足りません/, () => "Not enough marker / MediaPipe pairs"],
+  [/^動画かモーションがありません/, () => "No video or motion in this recording"],
+  [/^較正できません/, () => "Calibration failed"],
+];
+let LANG = "jp";
+try { if (localStorage.getItem("replayLang") === "en") LANG = "en"; } catch (e) { }
+{ const q = new URLSearchParams(location.search).get("lang"); if (q === "en" || q === "jp") LANG = q; }   // ?lang=en で開いても選べる
+const T = (k, ...a) => { const v = I18N[LANG][k]; return typeof v === "function" ? v(...a) : v; };
+const trStatus = s => { if (LANG === "jp" || !s) return s; for (const [re, f] of STATUS_EN) { const m = s.match(re); if (m) return f(m); } return s; };
+function applyLang() {
+  document.documentElement.lang = LANG === "en" ? "en" : "ja";
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = T(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = T(el.dataset.i18nTitle); });
+  $("langJP").classList.toggle("on", LANG === "jp"); $("langEN").classList.toggle("on", LANG === "en");
+}
+function setLang(l) {
+  LANG = l; try { localStorage.setItem("replayLang", l); } catch (e) { }
+  applyLang(); listSessions();
+  if (R.meta) { $("vidInfo").textContent = T("vidInfo", R.meta); document.title = T("docTitle", R.meta.name); }
+  drawVideo(); drawWave(); drawIQ(); drawNums();
+}
 
 // canvas を表示の大きさに合わせる (枠いっぱい)
 function prep(cv) {
@@ -123,14 +210,14 @@ function empty(cv, msg) { const { g, w, h } = prep(cv); g.fillStyle = C.sub; g.t
 async function listSessions() {
   const L = await (await fetch("/api/replay/sessions")).json();
   const cur = R.meta && R.meta.name;
-  $("sess").innerHTML = L.map(s => `<option value="${s.path}" ${s.name === cur ? "selected" : ""}>${s.name}（収録 ${s.caps}・生 ${s.raw}${s.video ? "・動画" : ""}）</option>`).join("");
+  $("sess").innerHTML = L.map(s => `<option value="${s.path}" ${s.name === cur ? "selected" : ""}>${T("sessOpt", s)}</option>`).join("");
 }
 function setMeta(m) {
   R.meta = m; R.t = m && m.caps.length ? m.caps[0].t0 : 0; R.playing = false; R.frT = -1; R.panKey = null; R.ov = null; R.im = null;
   if (!m) return;
   $("seek").max = m.duration;
-  $("vidInfo").textContent = `${m.duration.toFixed(1)} 秒・収録 ${m.caps.length}（生データ ${m.n_raw}）・FC/${m.div}・${m.level_dbm} dBm・${m.phase_deg}°`;
-  document.title = `記録の再生 — ${m.name}`;
+  $("vidInfo").textContent = T("vidInfo", m);
+  document.title = T("docTitle", m.name);
 }
 $("open").onclick = async () => {
   const r = await (await fetch("/api/replay/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: $("sess").value }) })).json();
@@ -156,7 +243,7 @@ function drawVideo() {
   const X = p => ox + p[0] * s, Y = p => oy + p[1] * s;
   g.fillStyle = "#11151c"; g.fillRect(ox, oy, vw * s, vh * s);
   if (im) g.drawImage(im, ox, oy, vw * s, vh * s);
-  else { g.fillStyle = "#98a2b3"; g.textAlign = "center"; g.fillText("この記録には動画がありません", w / 2, h / 2); }
+  else { g.fillStyle = "#98a2b3"; g.textAlign = "center"; g.fillText(T(R.meta && R.meta.video && !R.ov ? "loading" : "noVideo"), w / 2, h / 2); }
   if (ov && ov.mp && ov.mp.points) {
     const P = ov.mp.points; g.strokeStyle = "rgba(255,255,255,.75)"; g.lineWidth = 1.5;
     ov.mp.edges.forEach(([a, b]) => { if (!P[a] || !P[b]) return; g.beginPath(); g.moveTo(X(P[a]), Y(P[a])); g.lineTo(X(P[b]), Y(P[b])); g.stroke(); });
@@ -173,18 +260,18 @@ function drawVideo() {
       if ($("showNm").checked) { g.font = '11px system-ui,sans-serif'; g.fillStyle = "#fff"; g.strokeStyle = "rgba(0,0,0,.7)"; g.lineWidth = 3; g.textAlign = "left";
         g.strokeText(n, X(p) + 8, Y(p) - 6); g.fillText(n, X(p) + 8, Y(p) - 6); } });
     const miss = Object.entries(M).filter(([, p]) => !p).map(([n]) => n);
-    if (miss.length) { g.fillStyle = "#ffb4ab"; g.textAlign = "left"; g.font = '12px system-ui,sans-serif'; g.fillText("見えていない: " + miss.join(", "), ox + 8, oy + vh * s - 10); }
+    if (miss.length) { g.fillStyle = "#ffb4ab"; g.textAlign = "left"; g.font = '12px system-ui,sans-serif'; g.fillText(T("missing") + miss.join(", "), ox + 8, oy + vh * s - 10); }
   }
   const c = ov && ov.calib;
-  $("calib").textContent = ov && ov.status ? ov.status : c ? `較正: 誤差 ${c.median_px} px（中央値）・カメラの遅れ ${c.lag_s} s` : "";
+  $("calib").textContent = ov && ov.status ? trStatus(ov.status) : c ? T("calib", c) : "";
 }
 
 // ---------------------------------------------------------------- ① 送ったビット / リーダ出力 / 復調したビット
 function drawWave() {
   const P = R.panel, cv = $("wave"), wv = P && P.view && P.view.wave;
-  if (!wv) { empty(cv, P && P.cap ? "この収録には生データがありません（波形は出ません）" : "最初の収録の前です（BER と波形は最初の収録から）"); $("waveInfo").textContent = ""; return; }
-  const { g, w, h } = prep(cv), T = wv.span_us, nb = Math.ceil(T / wv.bit_us);
-  const a = axes(g, [76, 30, w - 10, h - 46], { xmin: 0, xmax: T, ymin: -1, ymax: 1, ylabel: "リーダ出力 [mV]" });
+  if (!wv) { empty(cv, !P ? T("loading") : P.cap ? T("noRaw") : T("beforeFirst")); $("waveInfo").textContent = ""; return; }
+  const { g, w, h } = prep(cv), Tsp = wv.span_us, nb = Math.ceil(Tsp / wv.bit_us);
+  const a = axes(g, [90, 30, w - 10, h - 46], { xmin: 0, xmax: Tsp, ymin: -1, ymax: 1, ylabel: T("reader") });
   const pk = Math.max(1, ...wv.reader_mv.map(Math.abs), ...wv.env_mv) * 1.1;
   const sy = v => a.Y1 - (v + pk) / (2 * pk) * (a.Y1 - a.Y0);
   // 縦軸 (mV)
@@ -206,12 +293,11 @@ function drawWave() {
       g.fillStyle = bad ? C.red : C.ink; g.fillText(bad && mark ? b + "✕" : String(b), x, y); });
     g.font = '12px "Hiragino Sans",system-ui,sans-serif'; g.textAlign = "right"; g.fillStyle = C.sub; g.fillText(title, a.X0 - 6, y);
   };
-  row(wv.sent, a.Y0 - 14, "送ったビット", false);
-  row(wv.got, a.Y1 + 14, "復調したビット", true);
+  row(wv.sent, a.Y0 - 14, T("sent"), false);
+  row(wv.got, a.Y1 + 14, T("got"), true);
   g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "alphabetic"; g.font = '11px "Hiragino Sans",system-ui,sans-serif';
-  g.fillText(`時間 [µs]（ペイロードの ${wv.first_bit + 1} ビット目から ${T} µs。橙 = リーダ出力、黒 = 包絡線、赤い列 = 誤ったビット）`, (a.X0 + a.X1) / 2, h - 4);
-  $("waveInfo").textContent = `収録 #${P.cap}・フレーム ${P.frame}：誤り ${wv.frame_errors} / ${P.numbers.npay} ビット` +
-    (P.held ? "（次の収録まで、この収録の最後のフレームを表示）" : "");
+  g.fillText(T("waveAxis", wv.first_bit + 1, Tsp), (a.X0 + a.X1) / 2, h - 4);
+  $("waveInfo").textContent = T("waveInfo", P, wv.frame_errors, P.numbers.npay) + (P.held ? T("held") : "");
 }
 // ---------------------------------------------------------------- ③ IQ
 function drawIQ() {
@@ -222,8 +308,8 @@ function drawIQ() {
   g.strokeStyle = "#cfd4dc"; g.beginPath(); g.moveTo(a.sx(0), a.Y0); g.lineTo(a.sx(0), a.Y1); g.stroke();
   c.i.forEach((x, k) => { if (c.bad[k]) return; g.fillStyle = "rgba(31,119,180,.45)"; g.fillRect(a.sx(x) - 1, a.sy(c.q[k]) - 1, 2.2, 2.2); });
   c.i.forEach((x, k) => { if (!c.bad[k]) return; g.fillStyle = C.red; g.beginPath(); g.arc(a.sx(x), a.sy(c.q[k]), 3, 0, 6.3); g.fill(); });
-  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "top"; g.fillText("I（判定軸）", (a.X0 + a.X1) / 2, a.Y1 + 4);
-  $("constInfo").textContent = `赤 = 誤り、EVM ${c.evm} %`;
+  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "top"; g.fillText(T("iAxis"), (a.X0 + a.X1) / 2, a.Y1 + 4);
+  $("constInfo").textContent = T("constInfo", c.evm);
 }
 // ---------------------------------------------------------------- ④ 数値
 function drawNums() {
@@ -231,11 +317,11 @@ function drawNums() {
   const col = v => v == null ? C.sub : v < 1e-5 ? C.green : v < 1e-3 ? "#c08400" : C.red;
   const row = (k, v, cls, style) => `<div class="k">${k}</div><div class="v ${cls || ""}" style="${style || ""}">${v}</div>`;
   const r = N.recent, t = N.total, c = N.cap, at = N.at || {};
-  let html = row(`現在の BER<br><span class="note">直近 ${r.expected} フレーム</span>`, r.bits ? sci(r.ber) : "—", "big", `color:${col(r.ber)}`);
-  html += row("累積 BER", t.bits ? `${sci(t.ber)} <span class="note">（${t.errors.toLocaleString()} / ${t.bits.toLocaleString()}）</span>` : "—");
-  html += row(N.held ? "直前の収録" : "この収録", c ? `#${c.cap}：${sci(c.ber)} <span class="note">（${c.frames}/${c.expected} フレーム）</span>` : `<span class="note">最初の収録の前</span>`);
-  html += row("このフレーム", at.frame != null ? `${at.frame}：${at.frame_errors < 0 ? "取得失敗" : `誤り ${at.frame_errors} / ${N.npay}`}` : "—");
-  if (c) html += row("レベル・位相差", `${c.level >= 0 ? "+" : ""}${c.level} dBm・${c.phase}°`);
+  let html = row(T("recent", r.expected), r.bits ? sci(r.ber) : "—", "big", `color:${col(r.ber)}`);
+  html += row(T("total"), t.bits ? `${sci(t.ber)} <span class="note">(${t.errors.toLocaleString()} / ${t.bits.toLocaleString()})</span>` : "—");
+  html += row(T(N.held ? "prevCap" : "thisCap"), c ? `#${c.cap}: ${sci(c.ber)} <span class="note">${T("frames", c.frames, c.expected)}</span>` : `<span class="note">${T("beforeFirstShort")}</span>`);
+  html += row(T("thisFrame"), at.frame != null ? `${at.frame}: ${at.frame_errors < 0 ? T("lost") : T("errs", at.frame_errors, N.npay)}` : "—");
+  if (c) html += row(T("levelPhase"), `${c.level >= 0 ? "+" : ""}${c.level} dBm · ${c.phase}°`);
   $("nums").innerHTML = html;
 }
 async function loadPanel(t) {
@@ -249,16 +335,16 @@ async function loadPanel(t) {
 // ---------------------------------------------------------------- タイムライン
 function drawTimeline() {
   const m = R.meta, { g, w, h } = prep($("tl")); if (!m) return;
-  const L = 44, Rr = 10, T = 6, B = 18, d = Math.max(m.duration, 1e-6);
-  const x = t => L + (w - L - Rr) * t / d, y = b => T + (h - T - B) * (1 - (Math.log10(Math.max(b, 1e-6)) + 6) / 6);
+  const L = 44, Rr = 10, TOP = 6, B = 18, d = Math.max(m.duration, 1e-6);
+  const x = t => L + (w - L - Rr) * t / d, y = b => TOP + (h - TOP - B) * (1 - (Math.log10(Math.max(b, 1e-6)) + 6) / 6);
   g.font = "11px system-ui, sans-serif"; g.fillStyle = C.sub; g.strokeStyle = C.grid;
   for (let e = -6; e <= 0; e += 2) { const yy = y(10 ** e); g.beginPath(); g.moveTo(L, yy); g.lineTo(w - Rr, yy); g.stroke(); g.textAlign = "right"; g.fillText(`1e${e}`, L - 4, yy + 4); }
   const step = [1, 2, 5, 10, 20, 30, 60, 120, 300].find(s => d / s <= 12) || 600; g.textAlign = "center";
   for (let t = 0; t <= d + 1e-9; t += step) g.fillText(`${t}s`, x(t), h - 4);
   for (const c of m.caps) { const x0 = x(c.t0), ww = Math.max(2, x(c.t1) - x0); g.fillStyle = c.raw ? C.blue : "#98a2b3";
     if (c.ber == null || c.errors === 0) { g.fillRect(x0, h - B - 4, ww, 4); continue; } const yy = y(c.ber); g.fillRect(x0, yy, ww, h - B - yy); }
-  g.strokeStyle = C.red; g.lineWidth = 2; g.beginPath(); g.moveTo(x(R.t), T - 4); g.lineTo(x(R.t), h - B + 2); g.stroke();
-  g.fillStyle = C.sub; g.textAlign = "left"; g.fillText("収録ごとの BER（青 = 生データあり。クリックでその時刻へ）", L + 4, T + 9);
+  g.strokeStyle = C.red; g.lineWidth = 2; g.beginPath(); g.moveTo(x(R.t), TOP - 4); g.lineTo(x(R.t), h - B + 2); g.stroke();
+  g.fillStyle = C.sub; g.textAlign = "left"; g.fillText(T("timeline"), L + 4, TOP + 9);
 }
 $("tl").addEventListener("click", e => { if (!R.meta) return; const b = $("tl").getBoundingClientRect(); seek((e.clientX - b.left - 44) / (b.width - 54) * R.meta.duration, false); });
 
@@ -286,7 +372,7 @@ function tick(now) {
     }
     if (!R.drag) $("seek").value = R.t;
     $("time").textContent = `${fmtT(R.t)} / ${fmtT(m.duration)}`;
-    $("play").textContent = R.playing ? "❚❚ 停止" : "▶ 再生";
+    $("play").textContent = T(R.playing ? "pause" : "play");
     drawTimeline();
     // 動画とマーカー: 前のコマを描き終えてから次を頼む。較正中は 1 秒ごとに状態を見直す
     if (!R.frBusy && (Math.abs(R.frT - R.t) > 1e-4 || (R.ov && R.ov.status && now - R.frAt > 1000))) { R.frAt = now; loadFrame(R.t); }
@@ -298,7 +384,10 @@ function tick(now) {
   R.last = now;
   requestAnimationFrame(tick);
 }
+$("langJP").onclick = () => setLang("jp");
+$("langEN").onclick = () => setLang("en");
 (async () => {
+  applyLang();
   await listSessions();
   const m = await (await fetch("/api/replay/meta")).json();
   if (m) setMeta(m);
