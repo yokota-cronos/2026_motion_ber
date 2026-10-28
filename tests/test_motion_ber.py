@@ -365,6 +365,14 @@ def test_viewer_endpoints(tmp_path=None):
         assert p["view"] is None and p["cap"] == 1                     # 生データが無いので図は無い
         n = p["numbers"]
         assert n["cap"]["cap"] == 1 and n["at"]["frame"] is not None and n["recent"]["expected"] > 0
+        # 収録の後 (次の収録までの間) は、直前の収録の最後のフレームを出し続ける
+        p2 = json.loads(urllib.request.urlopen(url + "/api/replay/panel?t=0.45").read())
+        n2 = p2["numbers"]
+        assert p2["cap"] == 1 and p2["held"] and n2["held"] and n2["cap"]["cap"] == 1
+        assert n2["at"]["frame"] == 249 and n2["recent"]["expected"] == 100
+        # 最初の収録より前は何も出さない
+        p0 = json.loads(urllib.request.urlopen(url + "/api/replay/panel?t=0.05").read())
+        assert p0["cap"] is None and not p0["held"] and p0["numbers"]["cap"] is None
         o = json.loads(urllib.request.urlopen(url + "/api/replay/overlay?t=0.3").read())
         assert o["markers"] is None                                      # 較正前 (人が写っていない)
         req = urllib.request.Request(url + "/api/power", b'{"on": true}', {"Content-Type": "application/json"})

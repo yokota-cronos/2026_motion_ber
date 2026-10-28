@@ -715,6 +715,23 @@ def _one_frame(res: dict, fe: np.ndarray, k: int) -> dict:
     return out
 
 
+def _held(r: replay.Replay, t: float) -> tuple[dict | None, float, bool]:
+    """時刻 t に出す収録と、そのための時刻。収録と収録の間 (転送待ち) では、直前の収録の最後の
+    フレームを出し続ける (次の BER の結果が出るまで前の結果を見せる)。
+
+    返り値: (収録 or None, 引く時刻, 前の収録を出し続けているか)"""
+    c = r.cap_at(t)
+    if c is not None:
+        return c, t, False
+    i = int(np.searchsorted(r.cap_t0, t, side="right")) - 1
+    if i < 0:
+        return None, t, False                            # 最初の収録より前
+    c = r.caps[i]
+    sel = np.nonzero(r.f_cap == c["cap"])[0]
+    te = float(r.f_t[sel[-1]]) + 1e-6 if sel.size else c["t1"]
+    return c, min(te, c["t1"]), True
+
+
 def replay_frame_view(t: float, span_us: float | None = None) -> tuple[dict | None, dict]:
     """時刻 t のテストフレームを .ad3 から復調して、gui_view.build_view の図の材料を返す。
 
@@ -723,9 +740,9 @@ def replay_frame_view(t: float, span_us: float | None = None) -> tuple[dict | No
         r = REPLAY
         if r is None:
             raise RuntimeError("記録を開いていません")
-        c = r.cap_at(t)
+        c, t, held = _held(r, t)
         if c is None or not c["raw"]:
-            return None, dict(ok=True, view=False, cap=None if c is None else c["cap"])
+            return None, dict(ok=True, view=False, cap=None if c is None else c["cap"], held=held)
         M = _demod_all(_raw_material(r.dir / c["raw"]))
         rx, st, fe = M["rx"], M["st"], M["fe"]
         if st.size == 0:
@@ -740,7 +757,7 @@ def replay_frame_view(t: float, span_us: float | None = None) -> tuple[dict | No
                           span_us or S.span_us, M["ddc_delay"], spec_from=r0, err_focus=S.view_mode == "error",
                           start_bit=S.next_start_bit(advance=False), spec_span_mhz=S.spec_span_mhz)
         return view, dict(ok=True, view=True, cap=c["cap"], frame=k, frames=int(st.size), errors=int(fe[k]),
-                          npay=rx.npay)
+                          npay=rx.npay, held=held)
 
 
 def replay_view(t: float) -> dict:
@@ -751,6 +768,7 @@ def replay_view(t: float) -> dict:
             bg.STATE.latest.update(view, frame_errors=[info["errors"]], npay=info["npay"])
             bg.STATE.view_id += 1
     info.pop("npay", None)
+    info.pop("held", None)
     return info
 
 
@@ -764,14 +782,14 @@ def replay_numbers(r: replay.Replay, t: float, n_recent: int = 100) -> dict:
     tail = r.f_err[max(0, nf - n_recent):nf]
     got = tail[tail >= 0]
     rec_b, rec_e = int(got.size) * r.npay, int(got.sum())
-    c = r.cap_at(t)
+    c, te, held = _held(r, t)
     return dict(recent=dict(ber=ber(rec_e, rec_b), errors=rec_e, bits=rec_b, frames=int(got.size), expected=int(tail.size)),
                 total=dict(ber=ber(tot_e, tot_b), errors=tot_e, bits=tot_b, frames=int(r.cum_frames[i]) if nf else 0,
                            expected=nf),
                 cap=None if c is None else dict(cap=c["cap"], ber=None if c["ber"] != c["ber"] else c["ber"],
                                                 errors=c["errors"], bits=c["bits"], frames=c["frames"],
                                                 expected=c["expected"], level=c["level"], phase=c["phase"]),
-                at=r.at(t), npay=r.npay)
+                at=r.at(te), npay=r.npay, held=held)
 
 
 def replay_ber(r: replay.Replay, t: float) -> None:

@@ -182,7 +182,7 @@ function drawVideo() {
 // ---------------------------------------------------------------- ① 送ったビット / リーダ出力 / 復調したビット
 function drawWave() {
   const P = R.panel, cv = $("wave"), wv = P && P.view && P.view.wave;
-  if (!wv) { empty(cv, P && P.cap ? "この収録には生データがありません（波形は出ません）" : "収録の外です（BER と波形があるのは収録の中だけ）"); $("waveInfo").textContent = ""; return; }
+  if (!wv) { empty(cv, P && P.cap ? "この収録には生データがありません（波形は出ません）" : "最初の収録の前です（BER と波形は最初の収録から）"); $("waveInfo").textContent = ""; return; }
   const { g, w, h } = prep(cv), T = wv.span_us, nb = Math.ceil(T / wv.bit_us);
   const a = axes(g, [76, 30, w - 10, h - 46], { xmin: 0, xmax: T, ymin: -1, ymax: 1, ylabel: "リーダ出力 [mV]" });
   const pk = Math.max(1, ...wv.reader_mv.map(Math.abs), ...wv.env_mv) * 1.1;
@@ -210,7 +210,8 @@ function drawWave() {
   row(wv.got, a.Y1 + 14, "復調したビット", true);
   g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "alphabetic"; g.font = '11px "Hiragino Sans",system-ui,sans-serif';
   g.fillText(`時間 [µs]（ペイロードの ${wv.first_bit + 1} ビット目から ${T} µs。橙 = リーダ出力、黒 = 包絡線、赤い列 = 誤ったビット）`, (a.X0 + a.X1) / 2, h - 4);
-  $("waveInfo").textContent = `収録 #${P.cap}・フレーム ${P.frame}：誤り ${wv.frame_errors} / ${P.numbers.npay} ビット`;
+  $("waveInfo").textContent = `収録 #${P.cap}・フレーム ${P.frame}：誤り ${wv.frame_errors} / ${P.numbers.npay} ビット` +
+    (P.held ? "（次の収録まで、この収録の最後のフレームを表示）" : "");
 }
 // ---------------------------------------------------------------- ③ IQ
 function drawIQ() {
@@ -232,7 +233,7 @@ function drawNums() {
   const r = N.recent, t = N.total, c = N.cap, at = N.at || {};
   let html = row(`現在の BER<br><span class="note">直近 ${r.expected} フレーム</span>`, r.bits ? sci(r.ber) : "—", "big", `color:${col(r.ber)}`);
   html += row("累積 BER", t.bits ? `${sci(t.ber)} <span class="note">（${t.errors.toLocaleString()} / ${t.bits.toLocaleString()}）</span>` : "—");
-  html += row("この収録", c ? `#${c.cap}：${sci(c.ber)} <span class="note">（${c.frames}/${c.expected} フレーム）</span>` : `<span class="note">収録の外</span>`);
+  html += row(N.held ? "直前の収録" : "この収録", c ? `#${c.cap}：${sci(c.ber)} <span class="note">（${c.frames}/${c.expected} フレーム）</span>` : `<span class="note">最初の収録の前</span>`);
   html += row("このフレーム", at.frame != null ? `${at.frame}：${at.frame_errors < 0 ? "取得失敗" : `誤り ${at.frame_errors} / ${N.npay}`}` : "—");
   if (c) html += row("レベル・位相差", `${c.level >= 0 ? "+" : ""}${c.level} dBm・${c.phase}°`);
   $("nums").innerHTML = html;
