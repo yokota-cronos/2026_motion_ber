@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""phase_control.py -- モーションから W2−W1 の位相差を決める差し込み口 (**いまは何もしない**)。
+"""phase_control.py -- モーションから W2−W1 の位相差を決める差し込み口。
 
-先々の構想: 学習済みモデルでモーション (7 マーカーの座標) からコイルのインピーダンスを
-推定し、ブリッジの打ち消しが最も深くなる位相差をリーダの AWG に入れる。
+学習済みモデルでモーション (7 マーカーの座標) からコイルのインピーダンスを推定し、
+ブリッジの打ち消しが最も深くなる位相差をリーダの AWG に入れる (実装は imp_phase_model.py)。
 
   motion_ber_gui.py --phase-model my_model.py
 
@@ -15,9 +15,16 @@ motion (dict):
     xyz       (7, 3) ndarray [m]。直近の収録窓の平均。見えていなかったマーカーは NaN
     valid     収録窓のうち全マーカーが見えていたフレームの割合 (0..1)
     t         収録窓の中央 [s、記録開始から]
+    history   (t (k,), xyz (k, 7, 3)): 呼んだ時点までの直近 HISTORY_SEC 秒の全フレーム (古い順、t は記録開始からの秒)。
+              先読みするモデル用。次の収録はこの最後のフレームの直後に始まる
+    horizon   画面で選んだ先読み [s] (0.1 / 0.2)。使わないモデルは無視してよい
     phase_deg いまの位相の指定値 [°]
     level_dbm いまのレベル [dBm]
     div       データレート FC/div
+
+戻り値は位相 [°] か None。dict(phase=..., ほかの値...) を返すと、ほかの値も記録フォルダの
+phase_pred.csv と画面に出る (推定したインピーダンスなど)。
+モジュールに setup() があれば、読み込んだときに 1 回呼ぶ (重いモデルの読み込みなど)。
 
 守ること:
   * 範囲は 90〜270° (GUI と同じ)。外れた値は捨てる。
@@ -32,6 +39,8 @@ import importlib.util
 from pathlib import Path
 
 PHASE_MIN, PHASE_MAX = 90.0, 270.0
+HORIZONS = (0.1, 0.2)                     # 画面で選べる先読み [s]
+HISTORY_SEC = 0.3                         # motion["history"] に渡す長さ [s]
 PHASE_OFFSET_DEG = 175.53 - 180.04        # 実測 → 指定値 (README「実測で決めた値」)
 
 
@@ -45,6 +54,8 @@ def load(path: str | None):
     spec.loader.exec_module(mod)
     if not callable(getattr(mod, "predict_phase", None)):
         raise RuntimeError(f"{p} に predict_phase(motion) がありません")
+    if callable(getattr(mod, "setup", None)):
+        mod.setup()                     # 重いモデルの読み込みなど (任意)
     return mod
 
 

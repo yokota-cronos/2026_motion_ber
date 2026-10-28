@@ -131,6 +131,76 @@ def test_auto_phase_hook(tmp_path=None):
         mb.bg.COMMANDS.clear()
 
 
+def test_auto_phase_history_and_info(tmp_path=None):
+    """先読みするモデル用の history / horizon と、dict を返したときの phase_pred.csv。"""
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    seen = {}
+
+    def predict(m):
+        seen.update(m)
+        return dict(phase=200.0, L_Z_R=20.0, L_Z_X=-10.0)
+
+    mb.PHASE_MODEL = NS(predict_phase=predict)
+    mb.OPTS.update(auto_phase=True, horizon=0.2)
+    mb.bg.COMMANDS.clear()
+    try:
+        log = _session(tmp)
+        t = time.perf_counter()
+        for k in range(60):                                   # 0.5 s 分 (120 fps)。HISTORY_SEC = 0.3 s の 36 コマだけ渡る
+            mb.MOTION._ingest(t - 0.5 + k / 120, k, 0.0, None, np.zeros((7, 3)) + k)
+        mb.CAPTURE.update(t0=t - 0.2, n=1_000_000, fs=100e6, rx_fs=12.5e6,
+                          res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int), frame_errors=np.zeros(0, int)))
+        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
+        ht, hx = seen["history"]
+        assert seen["horizon"] == 0.2 and np.all(np.diff(ht) > 0)
+        assert 34 <= hx.shape[0] <= 37 and hx.shape[1:] == (7, 3) and hx[-1, 0, 0] == 59
+        assert mb.bg.COMMANDS[-1] == dict(phase_deg=200.0)
+        assert mb.LAST["pred"]["L_Z_X"] == -10.0
+        log.close()
+        rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
+        assert rows[0]["horizon"] == "0.2" and rows[0]["phase"] == "200" and rows[0]["sent"] == "1"
+        assert rows[0]["L_Z_R"] == "20.0"
+    finally:
+        mb.PHASE_MODEL = None
+        mb.OPTS.update(auto_phase=False, horizon=0.1)
+        mb.LAST.pop("pred", None)
+        mb.bg.STATE.live["phase_deg"] = 180.0
+        mb.bg.COMMANDS.clear()
+
+
+def test_imp_phase_model():
+    """imp_phase_model.py: 位相の式、抜けの判定、学習データの一部を Motive の並びで流したときの推定。"""
+    import imp_phase_model as M
+    assert abs(M.phase_for_impedance([20, -10, 20, -10]) - 180.0) < 1e-9     # 左右同じなら 180°
+    # W1 = 左: 右 (W2) の位相が進むと、W2−W1 も進める
+    assert M.phase_for_impedance([20, 0, 20, 20]) > 180.0
+    t = np.arange(0, 0.3, 0.01)
+    assert M.spans_ok(t, 0.1, 0.25)[0] and not M.spans_ok(np.delete(t, [12, 13, 14, 15, 16, 17]), 0.1, 0.25)[0]
+    assert not M.spans_ok(t, -0.01, 0.2)[0]                                   # 履歴が足りない
+
+    csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1013_1103_kajihara_13.56MHz.csv"
+    if not M.MODEL_PATH.exists() or not csv_path.exists():
+        print("  (学習済みモデルか 1013 の CSV が無いので、推定は確かめない)")
+        return
+    rows = list(csv.DictReader(open(csv_path, encoding="utf-8")))[3000:3100]
+    names = motion.MARKER_GROUPS["upper"]["names"]                            # Motive の配信順 (MARKERS とは違う)
+    ts = np.array([float(r["Timestamp"]) for r in rows])
+    xyz = np.array([[[float(r[f"{n}_{a}"]) for a in "XYZ"] for n in names] for r in rows])
+    sel = (ts > ts[40] - 0.3) & (ts <= ts[40])
+    out = M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1))
+    assert out is not None
+    # 0.1 s 先の実測 (入れ替え補正つき: CSV の leftbody が右のコイル)
+    k = int(np.searchsorted(ts, ts[40] + 0.1))
+    real = [float(rows[k][c]) for c in ("rightbody_Z_R_13.56", "rightbody_Z_X_13.56",
+                                        "leftbody_Z_R_13.56", "leftbody_Z_X_13.56")]
+    assert all(abs(out[n] - v) < 10 for n, v in zip(M.TARGETS, real)), (out, real)
+    assert 90 <= out["phase"] <= 270
+    xyz[sel.nonzero()[0][-8:], 2] = np.nan                                    # 直近 0.08 s が隠れた → 変えない
+    assert M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1)) is None
+
+
 def test_http():
     mb.MOTION.close()
     mb.MOTION.buf.clear()

@@ -4,7 +4,7 @@
     uv run motion_ber_gui.py                 # http://127.0.0.1:8766 が開く
     uv run motion_ber_gui.py --fake-motion   # Motive 無し (合成モーション) で試す
     uv run motion_ber_gui.py --camera 0      # カメラも開く (画面の「カメラ」欄からも開ける)
-    uv run motion_ber_gui.py --phase-model phase_model_example.py   # 位相の自動調整 (先々用)
+    uv run motion_ber_gui.py --phase-model imp_phase_model.py   # 位相の自動調整 (モーション → インピーダンスの先読み)
 
 BER 側は ../2026_nfc_vhbr_ber/instruments/ber_gui.py を**そのまま import して**使い、次の 4 か所だけ
 差し替える (元のファイルは書き換えない。BER 側の改良はそのままこちらにも効く):
@@ -65,7 +65,7 @@ VIEWER = dict(on=False, calib=None, status="")    # --replay で開く再生用�
 _RAW_CACHE: dict = {}                     # .ad3 のパス -> 復調の材料 (直近 2 本)
 CAMERA = camera.Camera()
 CAPTURE: dict = {}            # 直近の収録: t0 [perf], n, fs, rx_fs, res。ワーカースレッドだけが書く
-OPTS = dict(require_motion=True, auto_phase=False, record_video=True)
+OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=phase_control.HORIZONS[0])
 PHASE_MODEL = None
 PHASE_MODEL_NAME = ""
 LAST: dict = {}               # 画面に出す直近の収録窓のモーション
@@ -150,6 +150,8 @@ class MotionSessionLog(bg.SessionLog):
              "opti_frame_last"] + xyz + [f"{n}_dev" for n in self.names] + ["raw_file"]) + "\n")
         self.fcsv = open(self.dir / "frames.csv", "w", encoding="utf-8", newline="", buffering=1 << 16)
         self.fcsv.write("cap,frame,t,errors,OptiFrame\n")
+        self.pcsv = None            # phase_pred.csv: 位相のモデルが dict を返したときだけ、最初の 1 回で開く
+        self.pcols: list[str] = []
         with MOTION.lock:
             MOTION.sink = self._motion_row
 
@@ -217,24 +219,45 @@ class MotionSessionLog(bg.SessionLog):
         self._auto_phase(mean, valid, (t0 + t1) / 2 - self.perf0)
 
     def _auto_phase(self, mean, valid, t_mid) -> None:
-        """位相の自動調整 (先々用)。収録 1 回に 1 回、GUI で位相を入れたのと同じ経路で反映する。"""
+        """位相の自動調整。収録 1 回に 1 回、GUI で位相を入れたのと同じ経路で、次の収録の前に反映する。"""
         if PHASE_MODEL is None or not OPTS["auto_phase"]:
             return
         live = dict(bg.STATE.live)
-        m = dict(names=self.names, xyz=mean, valid=valid, t=t_mid, phase_deg=live["phase_deg"],
-                 level_dbm=live["level_dbm"], div=live["div"])
+        now = time.perf_counter()
+        hist = MOTION.window(now - phase_control.HISTORY_SEC, now)
+        history = (np.array([f.t - self.perf0 for f in hist]),
+                   np.stack([f.xyz for f in hist]) if hist else np.empty((0, len(self.names), 3)))
+        m = dict(names=self.names, xyz=mean, valid=valid, t=t_mid, history=history, horizon=OPTS["horizon"],
+                 phase_deg=live["phase_deg"], level_dbm=live["level_dbm"], div=live["div"])
         try:
-            v = phase_control.clamp(PHASE_MODEL.predict_phase(m))
+            r = PHASE_MODEL.predict_phase(m)
         except Exception as e:                               # noqa: BLE001
             OPTS["auto_phase"] = False
             MOTION.error = f"位相モデルが失敗したので自動調整を切りました: {type(e).__name__}: {e}"
             return
-        if v is None or abs(v - live["phase_deg"]) < 0.01:
-            return
-        with bg.STATE.lock:
-            bg.STATE.live["phase_deg"] = v
-            bg.COMMANDS.append(dict(phase_deg=v))
-        LAST["auto_phase"] = v
+        info = r if isinstance(r, dict) else None
+        v = phase_control.clamp(info.get("phase") if info is not None else r)
+        sent = v is not None and abs(v - live["phase_deg"]) >= 0.01
+        if sent:
+            with bg.STATE.lock:
+                bg.STATE.live["phase_deg"] = v
+                bg.COMMANDS.append(dict(phase_deg=v))
+            LAST["auto_phase"] = v
+        if info is not None:
+            LAST["pred"] = dict(info, horizon=OPTS["horizon"], phase=v)
+            self._pred_row(now - self.perf0, info, v, sent)
+
+    def _pred_row(self, t, info: dict, v, sent: bool) -> None:
+        """phase_pred.csv: 位相のモデルが 1 回ごとに出した値 (推定したインピーダンスなど)。"""
+        if self.pcsv is None:
+            self.pcols = [k for k in info if k != "phase"]
+            self.pcsv = open(self.dir / "phase_pred.csv", "w", encoding="utf-8", newline="", buffering=1)
+            self.pcsv.write(",".join(["cap", "t", "horizon", "phase", "sent"] + self.pcols) + "\n")
+        cells = [str(self.n_cap), f"{t:.6f}", f"{OPTS['horizon']:g}", _f(v, "{:g}"), "1" if sent else "0"]
+        cells += [_f(info.get(k), "{}") for k in self.pcols]
+        with self.mlock:
+            if not self.pcsv.closed:
+                self.pcsv.write(",".join(cells) + "\n")
 
     def close(self):
         with MOTION.lock:
@@ -243,8 +266,9 @@ class MotionSessionLog(bg.SessionLog):
         if self.video is not None:
             self.video.close()
         with self.mlock:
-            for f in (self.mcsv, self.bcsv, self.fcsv):
-                f.close()
+            for f in (self.mcsv, self.bcsv, self.fcsv, self.pcsv):
+                if f is not None:
+                    f.close()
         super().close()
 
 
@@ -294,6 +318,7 @@ PANEL = """
     <div class="grp">
       <label class="chk" title="OFF: OptiTrack を受けていないときは BER の「開始」を断る"><input id="mNoReq" type="checkbox">OptiTrack なしでも開始できる</label>
       <label class="chk" id="mAutoL" title="--phase-model で渡したモデルが、収録ごとに位相差を決める"><input id="mAuto" type="checkbox">位相の自動調整</label>
+      <label title="モデルに渡す先読み。次の収録のときの姿勢を当てるために、この時間だけ先のインピーダンスで位相を決める">先読み<select id="mHor"><option value="0.1">100 ms 先</option><option value="0.2">200 ms 先</option></select></label>
     </div>
     <div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;font-size:13px">
       <span><span id="mDot" style="width:10px;height:10px;border-radius:50%;background:#888;display:inline-block;margin-right:6px"></span><b id="mText">未接続</b></span>
@@ -358,6 +383,8 @@ PANEL_JS = """
       val("mNoReq").checked = !s.require_motion;
       val("mAuto").checked = s.auto_phase; val("mAuto").disabled = !s.model;
       val("mAutoL").lastChild.textContent = s.model ? `位相の自動調整（${s.model}）` : "位相の自動調整（--phase-model 未指定）";
+      if (document.activeElement !== val("mHor")) val("mHor").value = String(s.horizon);
+      val("mHor").disabled = !s.model;
       const src = { natnet: "OptiTrack", fake: "合成", "": "" }[s.source];
       val("mDot").style.background = s.receiving ? "#2ca02c" : (s.source ? "#f28e2b" : "#888");
       val("mText").textContent = !s.source ? "未接続" : s.receiving
@@ -368,6 +395,9 @@ PANEL_JS = """
       const L = s.last;
       val("mLast").textContent = L && L.cap ? `直近の収録 #${L.cap}: モーション ${L.motion_frames} フレーム、全点見えていた ${(L.valid_frac * 100).toFixed(0)}%` +
         (L.auto_phase != null ? `、自動位相 ${L.auto_phase}°` : "") : "";
+      const P = L && L.pred, z = (r, x) => `${r.toFixed(1)}${x < 0 ? "−" : "+"}j${Math.abs(x).toFixed(1)}`;
+      if (P && P.L_Z_R != null) val("mLast").textContent += `　推定 Z（${P.horizon * 1000} ms 先）: 左 ${z(P.L_Z_R, P.L_Z_X)} Ω・右 ${z(P.R_Z_R, P.R_Z_X)} Ω → ` +
+        (P.phase != null ? `指定 ${P.phase}°` : "範囲外なので変えない");
       const c = s.camera;
       val("mErr").textContent = [s.error, c.error].filter(Boolean).join("　");
       val("mDiag").textContent = s.diag || "（まだフレームを受けていません）";
@@ -502,6 +532,7 @@ PANEL_JS = """
   val("mGroup").onchange = () => mpost("/api/motion/options", { group: val("mGroup").value });
   val("mNoReq").onchange = () => mpost("/api/motion/options", { require_motion: !val("mNoReq").checked });
   val("mAuto").onchange = () => mpost("/api/motion/options", { auto_phase: val("mAuto").checked });
+  val("mHor").onchange = () => mpost("/api/motion/options", { horizon: +val("mHor").value });
   val("cOpen").onclick = () => mpost("/api/camera/open", { index: +val("cIndex").value });
   val("cClose").onclick = () => mpost("/api/camera/close");
   val("cRec").onchange = () => mpost("/api/motion/options", { record_video: val("cRec").checked });
@@ -905,7 +936,7 @@ def motion_status() -> dict:
     s = bg.SESSION
     logging = isinstance(s, MotionSessionLog) and MOTION.sink is not None
     return dict(MOTION.status(), require_motion=OPTS["require_motion"], auto_phase=OPTS["auto_phase"],
-                model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
+                horizon=OPTS["horizon"], model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
                 camera=CAMERA.status(), record_video=OPTS["record_video"],
                 video_recording=logging and getattr(s, "video", None) is not None,
                 replay=None if REPLAY is None else REPLAY.dir.name)
@@ -1037,6 +1068,11 @@ class Handler(bg.Handler):
                     raise RuntimeError("位相のモデルがありません (--phase-model で渡す)")
                 OPTS["auto_phase"] = bool(q["auto_phase"])
                 MOTION.error = ""
+            if "horizon" in q:
+                h = float(q["horizon"])
+                if h not in phase_control.HORIZONS:
+                    raise ValueError(f"先読みは {phase_control.HORIZONS} s のどれか")
+                OPTS["horizon"] = h                                # 次の収録の予測から効く
             if "record_video" in q:
                 OPTS["record_video"] = bool(q["record_video"])     # 次の記録から効く
             return dict(ok=True)
@@ -1074,7 +1110,10 @@ def main() -> int:
     ap.add_argument("--connect", action="store_true", help="起動時に OptiTrack へ繋ぐ")
     ap.add_argument("--fake-motion", action="store_true", help="起動時に合成モーションを流す (Motive 無しの試験用)")
     ap.add_argument("--camera", type=int, metavar="N", help="起動時にカメラ N を開く (0 = 内蔵のことが多い)")
-    ap.add_argument("--phase-model", help="predict_phase(motion) を持つ .py (phase_control.py 参照)")
+    ap.add_argument("--phase-model", help="predict_phase(motion) を持つ .py (phase_control.py 参照)。"
+                    "モーションからインピーダンスを先読みして決めるなら imp_phase_model.py")
+    ap.add_argument("--horizon", type=float, choices=phase_control.HORIZONS, default=phase_control.HORIZONS[0],
+                    help="位相のモデルに渡す先読み [s] (既定 0.1。画面でも変えられる)")
     ap.add_argument("--replay", nargs="?", const="latest", metavar="FOLDER",
                     help="記録の再生用の画面で開く (装置には触らない)。FOLDER を省くといちばん新しい記録")
     ap.add_argument("--no-browser", action="store_true")
@@ -1085,6 +1124,7 @@ def main() -> int:
     bg.DEFAULT_DIV = a.div
     bg.STATE.live["div"] = a.div
     MOTION.set_group(a.group)
+    OPTS["horizon"] = a.horizon
     if a.phase_model:
         PHASE_MODEL = phase_control.load(a.phase_model)
         PHASE_MODEL_NAME = Path(a.phase_model).name

@@ -18,6 +18,8 @@ dependencies = [
     "opencv-contrib-python>=4.10",       # mediapipe が要求する。opencv-python と同じ cv2 なので片方だけ入れる
     "scipy>=1.10",
     "ziglang<0.17",
+    "scikit-learn>=1.5",
+    "pandas>=2.0",
 ]
 
 [tool.uv]
