@@ -158,7 +158,7 @@ def test_auto_phase_history_and_info(tmp_path=None):
         return dict(phase=next(vals), L_Z_R=20.0, L_Z_X=-10.0)
 
     mb.PHASE_MODEL = NS(predict_phase=predict)
-    mb.OPTS.update(auto_phase=True, horizon=0.2)
+    mb.OPTS.update(auto_phase=True, horizon=0.2, swap_lr=True)
     mb.bg.COMMANDS.clear()
     try:
         log = _session(tmp)
@@ -170,6 +170,7 @@ def test_auto_phase_history_and_info(tmp_path=None):
         log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
         ht, hx = seen["history"]
         assert seen["horizon"] == 0.2 and np.all(np.diff(ht) > 0)
+        assert seen["names"][1] == "L_upperarm" and seen["names"][0] == "chest"     # 左右逆のラベルを本人の左右に
         assert 34 <= hx.shape[0] <= 37 and hx.shape[1:] == (7, 3) and hx[-1, 0, 0] == 59
         log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
         assert mb.bg.COMMANDS == [dict(phase_deg=183.0)]                    # 初期 180° + (203 − 200)
@@ -181,7 +182,7 @@ def test_auto_phase_history_and_info(tmp_path=None):
         assert rows[1]["horizon"] == "0.2" and rows[1]["phase_model"] == "203.0" and rows[1]["L_Z_R"] == "20.0"
     finally:
         mb.PHASE_MODEL = None
-        mb.OPTS.update(auto_phase=False, horizon=0.1)
+        mb.OPTS.update(auto_phase=False, horizon=0.1, swap_lr=False)
         mb.LAST.pop("pred", None)
         mb.bg.STATE.live["phase_deg"] = 180.0
         mb.bg.COMMANDS.clear()

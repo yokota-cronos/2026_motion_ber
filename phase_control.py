@@ -18,7 +18,8 @@
 `Bridge.set_phase()` として反映される。None を返せば位相は変えない。
 
 motion (dict):
-    names     マーカー名 (配信順) のタプル
+    names     マーカー名 (配信順) のタプル。画面の「マーカーの左右が逆」(--swap-lr) が入っていれば
+              R_* と L_* を入れ替えた名前 (= 本人の左右)。記録の CSV は Motive のラベルのまま
     xyz       (7, 3) ndarray [m]。直近の収録窓の平均。見えていなかったマーカーは NaN
     valid     収録窓のうち全マーカーが見えていたフレームの割合 (0..1)
     t         収録窓の中央 [s、記録開始から]
@@ -64,6 +65,13 @@ def load(path: str | None):
     if callable(getattr(mod, "setup", None)):
         mod.setup()                     # 重いモデルの読み込みなど (任意)
     return mod
+
+
+def swap_lr(name: str) -> str:
+    """R_* ↔ L_* (Motive のラベルが左右逆のとき、モデルに渡す名前を本人の左右に直す)。"""
+    if name.startswith(("R_", "L_")):
+        return ("L_" if name[0] == "R" else "R_") + name[2:]
+    return name
 
 
 def clamp(v) -> float | None:

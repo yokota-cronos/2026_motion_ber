@@ -65,7 +65,8 @@ VIEWER = dict(on=False, calib=None, status="")    # --replay で開く再生用�
 _RAW_CACHE: dict = {}                     # .ad3 のパス -> 復調の材料 (直近 2 本)
 CAMERA = camera.Camera()
 CAPTURE: dict = {}            # 直近の収録: t0 [perf], n, fs, rx_fs, res。ワーカースレッドだけが書く
-OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=phase_control.HORIZONS[0])
+OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=phase_control.HORIZONS[0],
+            swap_lr=False)       # swap_lr: Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ R_* ↔ L_* にする
 PHASE_MODEL = None
 PHASE_MODEL_NAME = ""
 LAST: dict = {}               # 画面に出す直近の収録窓のモーション
@@ -145,6 +146,7 @@ class MotionSessionLog(bg.SessionLog):
             capture_window="[FDwfAnalogInConfigure の直前, + samples / fs]。開始の USB 遅れ (~1 ms) は未較正",
             motion_time="NatNet のフレームを受けた時刻。Motive の処理・配信の遅れ (数 ms) は未較正",
             phase_model=PHASE_MODEL_NAME or None,
+            phase_model_swap_lr=OPTS["swap_lr"] if PHASE_MODEL_NAME else None,   # 開始時。途中の切り替えは phase_pred.csv の swap_lr
         ), ensure_ascii=False, indent=2), encoding="utf-8")
 
         xyz = [f"{n}_{a}" for n in self.names for a in "XYZ"]
@@ -234,7 +236,8 @@ class MotionSessionLog(bg.SessionLog):
         hist = MOTION.window(now - phase_control.HISTORY_SEC, now)
         history = (np.array([f.t - self.perf0 for f in hist]),
                    np.stack([f.xyz for f in hist]) if hist else np.empty((0, len(self.names), 3)))
-        m = dict(names=self.names, xyz=mean, valid=valid, t=t_mid, history=history, horizon=OPTS["horizon"],
+        names = tuple(phase_control.swap_lr(n) for n in self.names) if OPTS["swap_lr"] else self.names
+        m = dict(names=names, xyz=mean, valid=valid, t=t_mid, history=history, horizon=OPTS["horizon"],
                  phase_deg=live["phase_deg"], level_dbm=live["level_dbm"], div=live["div"])
         try:
             r = PHASE_MODEL.predict_phase(m)
@@ -260,7 +263,7 @@ class MotionSessionLog(bg.SessionLog):
                 bg.COMMANDS.append(dict(phase_deg=v))
             REF["last"] = v
             LAST["auto_phase"] = v
-        row = dict(phase_model=p, base=REF["base"], delta=round(p - REF["ref"], 3))
+        row = dict(phase_model=p, base=REF["base"], delta=round(p - REF["ref"], 3), swap_lr=int(OPTS["swap_lr"]))
         LAST["pred"] = dict(info or {}, **row, horizon=OPTS["horizon"], phase=v)
         self._pred_row(now - self.perf0, dict(row, **{k: x for k, x in (info or {}).items() if k != "phase"}), v, sent)
 
@@ -336,6 +339,7 @@ PANEL = """
       <label class="chk" title="OFF: OptiTrack を受けていないときは BER の「開始」を断る"><input id="mNoReq" type="checkbox">OptiTrack なしでも開始できる</label>
       <label class="chk" id="mAutoL" title="入れたときの位相を初期位相にして、--phase-model のモデルが推定した変化ぶんだけ収録ごとにずらす。手で位相を変えると、それが新しい初期位相になる"><input id="mAuto" type="checkbox">位相の自動調整</label>
       <label title="モデルに渡す先読み。次の収録のときの姿勢を当てるために、この時間だけ先のインピーダンスで位相を決める">先読み<select id="mHor"><option value="0.1">100 ms 先</option><option value="0.2">200 ms 先</option></select></label>
+      <label class="chk" title="Motive のラベルが左右逆 (R_* が本人の左腕) のとき入れる。位相のモデルに渡す名前だけ入れ替える。記録の CSV はラベルのまま (後で fix_lr.py で直す)"><input id="mSwap" type="checkbox">マーカーの左右が逆</label>
     </div>
     <div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;font-size:13px">
       <span><span id="mDot" style="width:10px;height:10px;border-radius:50%;background:#888;display:inline-block;margin-right:6px"></span><b id="mText">未接続</b></span>
@@ -402,6 +406,7 @@ PANEL_JS = """
       val("mAutoL").lastChild.textContent = s.model ? `位相の自動調整（${s.model}）` : "位相の自動調整（--phase-model 未指定）";
       if (document.activeElement !== val("mHor")) val("mHor").value = String(s.horizon);
       val("mHor").disabled = !s.model;
+      val("mSwap").checked = s.swap_lr; val("mSwap").disabled = !s.model;
       const src = { natnet: "OptiTrack", fake: "合成", "": "" }[s.source];
       val("mDot").style.background = s.receiving ? "#2ca02c" : (s.source ? "#f28e2b" : "#888");
       val("mText").textContent = !s.source ? "未接続" : s.receiving
@@ -551,6 +556,7 @@ PANEL_JS = """
   val("mNoReq").onchange = () => mpost("/api/motion/options", { require_motion: !val("mNoReq").checked });
   val("mAuto").onchange = () => mpost("/api/motion/options", { auto_phase: val("mAuto").checked });
   val("mHor").onchange = () => mpost("/api/motion/options", { horizon: +val("mHor").value });
+  val("mSwap").onchange = () => mpost("/api/motion/options", { swap_lr: val("mSwap").checked });
   val("cOpen").onclick = () => mpost("/api/camera/open", { index: +val("cIndex").value });
   val("cClose").onclick = () => mpost("/api/camera/close");
   val("cRec").onchange = () => mpost("/api/motion/options", { record_video: val("cRec").checked });
@@ -954,7 +960,7 @@ def motion_status() -> dict:
     s = bg.SESSION
     logging = isinstance(s, MotionSessionLog) and MOTION.sink is not None
     return dict(MOTION.status(), require_motion=OPTS["require_motion"], auto_phase=OPTS["auto_phase"],
-                horizon=OPTS["horizon"], model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
+                horizon=OPTS["horizon"], swap_lr=OPTS["swap_lr"], model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
                 camera=CAMERA.status(), record_video=OPTS["record_video"],
                 video_recording=logging and getattr(s, "video", None) is not None,
                 replay=None if REPLAY is None else REPLAY.dir.name)
@@ -1094,6 +1100,9 @@ class Handler(bg.Handler):
                 if h != OPTS["horizon"]:
                     OPTS["horizon"] = h                            # 次の収録の予測から効く
                     reset_phase_ref()                              # モデルが変わるので、いまの位相を初期位相に取り直す
+            if "swap_lr" in q and bool(q["swap_lr"]) != OPTS["swap_lr"]:
+                OPTS["swap_lr"] = bool(q["swap_lr"])
+                reset_phase_ref()                                  # 推定が変わるので、いまの位相を初期位相に取り直す
             if "record_video" in q:
                 OPTS["record_video"] = bool(q["record_video"])     # 次の記録から効く
             return dict(ok=True)
@@ -1135,6 +1144,8 @@ def main() -> int:
                     "モーションからインピーダンスを先読みして決めるなら imp_phase_model.py")
     ap.add_argument("--horizon", type=float, choices=phase_control.HORIZONS, default=phase_control.HORIZONS[0],
                     help="位相のモデルに渡す先読み [s] (既定 0.1。画面でも変えられる)")
+    ap.add_argument("--swap-lr", action="store_true",
+                    help="Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ入れ替える (画面でも変えられる)")
     ap.add_argument("--replay", nargs="?", const="latest", metavar="FOLDER",
                     help="記録の再生用の画面で開く (装置には触らない)。FOLDER を省くといちばん新しい記録")
     ap.add_argument("--no-browser", action="store_true")
@@ -1146,6 +1157,7 @@ def main() -> int:
     bg.STATE.live["div"] = a.div
     MOTION.set_group(a.group)
     OPTS["horizon"] = a.horizon
+    OPTS["swap_lr"] = a.swap_lr
     if a.phase_model:
         PHASE_MODEL = phase_control.load(a.phase_model)
         PHASE_MODEL_NAME = Path(a.phase_model).name
