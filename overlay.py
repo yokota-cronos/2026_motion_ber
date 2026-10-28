@@ -4,7 +4,9 @@
 カメラ (C920) と OptiTrack は較正されていないので、記録そのものから求める:
 
   1. 動画のコマを間引いて MediaPipe Pose で骨格 (肩・肘・手首…) を取る
-  2. マーカーを MediaPipe の点に対応させる (MARKER_TO_MP。chest = 両肩の中点、R_joint = 右肘、…)
+  2. マーカーを MediaPipe の点に対応させる (MARKER_TO_MP。chest = 両肩の中点、R_joint = 右肘、…)。
+     MediaPipe の点は関節の中心 (腕の中) だが、マーカーは腕の外側の表面に付いているので、
+     手足の点は胴体から離れる向きに「肩幅 x OUTWARD」だけずらしてから対応させる
   3. 同じ時刻の「マーカーの 3D 座標」と「動画上の 2D 位置」の組をたくさん集め、ピンホールカメラ
      (焦点距離 f は C920 の公称値に固定、主点は画面中央、歪みなし) の位置と向きを solvePnP で求める
   4. 動画とモーションの時刻のずれ (カメラの遅れ) も、再投影誤差が最小になるように探す
@@ -55,6 +57,10 @@ LR_SWAP = {11: 12, 12: 11, 13: 14, 14: 13, 15: 16, 16: 15, 23: 24, 24: 23, 25: 2
 MP_EDGES = [(11, 12), (11, 13), (13, 15), (12, 14), (14, 16), (11, 23), (12, 24), (23, 24),
             (23, 25), (25, 27), (24, 26), (26, 28)]
 VIS_MIN = 0.5                 # MediaPipe の visibility がこれ未満の点は使わない
+# 手足のマーカーを関節の中心から外側へずらす量 (肩幅 / 腰幅に対する比) の候補。記録ごとに誤差が最小の
+# ものを選ぶ。2026-10-27 の 30 秒の記録: 0 で 8.4 px、0.20 で 4.6 px (最小)。肩幅 (関節の中心どうし
+# 約 33 cm) の 0.2 = 約 7 cm = 腕の太さの半分 + マーカーの高さ。ずらさないと重ねた骨格が腕の中心を通る
+OUTWARDS = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35)
 N_CALIB_FRAMES = 150          # 較正に使うコマ数 (動画全体から等間隔)
 LAGS = np.arange(-0.20, 0.401, 0.02)       # 探すカメラの遅れ [s]
 FOCAL_PX_640 = 500.0          # C920 の 640x480 (対角画角 約 78°) の焦点距離 [px]。幅に比例させる
@@ -111,16 +117,31 @@ def detect_frames(video: Path, frames: list[int], det: PoseDetector, progress=No
     return out
 
 
-def _mp_point(lm: np.ndarray, spec, swap: bool):
+def _mp_point(lm: np.ndarray, spec, swap: bool, outward: float = 0.0):
+    """マーカーに対応する動画上の点。手足は胴体から離れる向きに outward x 肩幅 (脚は腰幅) ずらす。"""
     a, b, s = spec
     if swap:
         a, b = LR_SWAP.get(a, a), LR_SWAP.get(b, b)
     if lm[a, 2] < VIS_MIN or lm[b, 2] < VIS_MIN:
         return None
-    return lm[a, :2] + s * (lm[b, :2] - lm[a, :2])
+    u = lm[a, :2] + s * (lm[b, :2] - lm[a, :2])
+    l, r = (23, 24) if a >= 23 else (11, 12)              # 脚なら腰、腕なら肩が基準
+    if outward == 0.0 or {a, b} == {l, r}:                 # chest / waist は体の中心なのでずらさない
+        return u
+    if lm[l, 2] < VIS_MIN or lm[r, 2] < VIS_MIN:
+        return None
+    width = np.linalg.norm(lm[l, :2] - lm[r, :2])
+    mid = (lm[l, :2] + lm[r, :2]) / 2
+    # 手足の向き: 区間ならその向き、関節 1 点 (肘・膝) なら 1 つ上の関節から 1 つ下の関節へ
+    p0, p1 = (a, b) if a != b else (a - 2, a + 2)
+    seg = lm[p1, :2] - lm[p0, :2]
+    n = np.array([-seg[1], seg[0]]) / (np.linalg.norm(seg) + 1e-9)
+    if np.dot(n, u - mid) < 0:                             # 胴体から離れる向き
+        n = -n
+    return u + outward * width * n
 
 
-def _pairs(rep, frames, lms, lag: float, swap: bool):
+def _pairs(rep, frames, lms, lag: float, swap: bool, outward: float = 0.0):
     """(3D マーカー, 2D の MediaPipe 点) の組を集める。"""
     X, U = [], []
     names = rep.names
@@ -137,7 +158,7 @@ def _pairs(rep, frames, lms, lag: float, swap: bool):
             spec = MARKER_TO_MP.get(n)
             if spec is None or np.isnan(rep.xyz[i, j]).any():
                 continue
-            u = _mp_point(lm, spec, swap)
+            u = _mp_point(lm, spec, swap, outward)
             if u is not None:
                 X.append(rep.xyz[i, j])
                 U.append(u)
@@ -166,7 +187,7 @@ def calibrate(rep, progress=None, force: bool = False) -> dict:
     out_json = rep.dir / "overlay_calib.json"
     if out_json.exists() and not force:
         c = json.loads(out_json.read_text(encoding="utf-8"))
-        if c.get("ok"):
+        if c.get("ok") and "outward" in c:                 # 外側へのずらしを入れる前の較正はやり直す
             return c
     if not rep.has_video or rep.tm.size == 0:
         return dict(ok=False, message="動画かモーションがありません")
@@ -198,12 +219,14 @@ def calibrate(rep, progress=None, force: bool = False) -> dict:
     #    並ぶと「正面から」と「左右を入れ替えて背中から」が見分けられない (2026-10-27: 8.47 対
     #    8.40 px)。だからラベルどおり (R_* = 本人の右 = MediaPipe の右) を基本にし、入れ替えは
     #    10 % 以上良いときだけ採る
+    #    外側へのずらし (OUTWARDS) もここで一緒に決める
     fits = {}
     for swap in (False, True):
-        X, U = _pairs(rep, frames, lms, 0.0, swap)
-        r = _fit(X, U, w, h, f) if len(X) >= 12 else None
-        if r:
-            fits[swap] = dict(r, f=f, swap=swap, lag=0.0)
+        for out in OUTWARDS:
+            X, U = _pairs(rep, frames, lms, 0.0, swap, out)
+            r = _fit(X, U, w, h, f) if len(X) >= 12 else None
+            if r and (swap not in fits or r["med"] < fits[swap]["med"]):
+                fits[swap] = dict(r, f=f, swap=swap, lag=0.0, out=out)
     best = fits.get(False)
     if True in fits and (best is None or fits[True]["med"] < 0.9 * best["med"]):
         best = fits[True]
@@ -213,14 +236,14 @@ def calibrate(rep, progress=None, force: bool = False) -> dict:
     #    遅れ 0 より 5 % 以上良くなるときだけ採る
     lag0, cand = best, None
     for lag in LAGS:
-        X, U = _pairs(rep, frames, lms, float(lag), best["swap"])
+        X, U = _pairs(rep, frames, lms, float(lag), best["swap"], best["out"])
         r = _fit(X, U, w, h, f) if len(X) >= 12 else None
         if r and (cand is None or r["med"] < cand["med"]):
-            cand = dict(r, f=f, swap=best["swap"], lag=float(lag))
+            cand = dict(r, f=f, swap=best["swap"], lag=float(lag), out=best["out"])
     if cand is not None and cand["med"] < 0.95 * lag0["med"]:
         best = cand
     c = dict(ok=True, width=w, height=h, focal_px=round(best["f"], 1), rvec=best["rvec"].ravel().tolist(),
-             tvec=best["tvec"].ravel().tolist(), lag_s=round(best["lag"], 3), lr_swapped=bool(best["swap"]),
+             tvec=best["tvec"].ravel().tolist(), lag_s=round(best["lag"], 3), lr_swapped=bool(best["swap"]), outward=best["out"],
              rms_px=round(best["rms"], 2), median_px=round(best["med"], 2), inliers=best["n_in"], pairs=best["n"], frames_used=n_found,
              frames_sampled=len(frames), seconds=round(time.time() - t0, 1),
              note="ピンホール (主点 = 画面中央、歪みなし)。lag_s = モーションの時刻 = 動画の時刻 - lag_s")
