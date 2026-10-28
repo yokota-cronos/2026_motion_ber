@@ -69,6 +69,12 @@ OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=ph
 PHASE_MODEL = None
 PHASE_MODEL_NAME = ""
 LAST: dict = {}               # 画面に出す直近の収録窓のモーション
+REF = dict(base=None, ref=None, last=None)   # 位相の自動調整の基準: 初期位相・そのときのモデルの位相・最後に送った位相
+
+
+def reset_phase_ref() -> None:
+    """次の収録で、そのときの画面の位相を初期位相として基準を取り直す。"""
+    REF.update(base=None, ref=None, last=None)
 
 
 # --------------------------------------------------------------------------- 差し替え
@@ -115,6 +121,7 @@ class MotionSessionLog(bg.SessionLog):
 
     def __init__(self, cond: dict):
         super().__init__(cond)
+        reset_phase_ref()
         self.perf0, self.wall0 = time.perf_counter(), time.time()
         self.names = MOTION.names
         self.n_cap = 0
@@ -236,21 +243,31 @@ class MotionSessionLog(bg.SessionLog):
             MOTION.error = f"位相モデルが失敗したので自動調整を切りました: {type(e).__name__}: {e}"
             return
         info = r if isinstance(r, dict) else None
-        v = phase_control.clamp(info.get("phase") if info is not None else r)
-        sent = v is not None and abs(v - live["phase_deg"]) >= 0.01
+        p = info.get("phase") if info is not None else r
+        if p is None:                                        # モデルが「分からない」→ 位相は変えない
+            return
+        p, cur = float(p), live["phase_deg"]
+        # 初期位相 = 基準を取ったときの画面の位相。そこから「モデルの位相が基準から動いたぶん」だけずらす。
+        # 基準を取り直すのは、記録の開始・自動調整を入れたとき・先読みを変えたとき (reset_phase_ref) と、
+        # 手で位相を変えたとき (画面の位相が最後に送った値と違う = それを新しい初期位相にする)
+        if REF["base"] is None or abs(cur - REF["last"]) >= 0.01:
+            REF.update(base=cur, ref=p, last=cur)
+        v = phase_control.clamp(REF["base"] + p - REF["ref"])
+        sent = v is not None and abs(v - cur) >= 0.01
         if sent:
             with bg.STATE.lock:
                 bg.STATE.live["phase_deg"] = v
                 bg.COMMANDS.append(dict(phase_deg=v))
+            REF["last"] = v
             LAST["auto_phase"] = v
-        if info is not None:
-            LAST["pred"] = dict(info, horizon=OPTS["horizon"], phase=v)
-            self._pred_row(now - self.perf0, info, v, sent)
+        row = dict(phase_model=p, base=REF["base"], delta=round(p - REF["ref"], 3))
+        LAST["pred"] = dict(info or {}, **row, horizon=OPTS["horizon"], phase=v)
+        self._pred_row(now - self.perf0, dict(row, **{k: x for k, x in (info or {}).items() if k != "phase"}), v, sent)
 
     def _pred_row(self, t, info: dict, v, sent: bool) -> None:
-        """phase_pred.csv: 位相のモデルが 1 回ごとに出した値 (推定したインピーダンスなど)。"""
+        """phase_pred.csv: 1 回ごとの位相の決め方 (初期位相・補正量) と、モデルが出した値 (推定したインピーダンスなど)。"""
         if self.pcsv is None:
-            self.pcols = [k for k in info if k != "phase"]
+            self.pcols = list(info)
             self.pcsv = open(self.dir / "phase_pred.csv", "w", encoding="utf-8", newline="", buffering=1)
             self.pcsv.write(",".join(["cap", "t", "horizon", "phase", "sent"] + self.pcols) + "\n")
         cells = [str(self.n_cap), f"{t:.6f}", f"{OPTS['horizon']:g}", _f(v, "{:g}"), "1" if sent else "0"]
@@ -317,7 +334,7 @@ PANEL = """
     </div>
     <div class="grp">
       <label class="chk" title="OFF: OptiTrack を受けていないときは BER の「開始」を断る"><input id="mNoReq" type="checkbox">OptiTrack なしでも開始できる</label>
-      <label class="chk" id="mAutoL" title="--phase-model で渡したモデルが、収録ごとに位相差を決める"><input id="mAuto" type="checkbox">位相の自動調整</label>
+      <label class="chk" id="mAutoL" title="入れたときの位相を初期位相にして、--phase-model のモデルが推定した変化ぶんだけ収録ごとにずらす。手で位相を変えると、それが新しい初期位相になる"><input id="mAuto" type="checkbox">位相の自動調整</label>
       <label title="モデルに渡す先読み。次の収録のときの姿勢を当てるために、この時間だけ先のインピーダンスで位相を決める">先読み<select id="mHor"><option value="0.1">100 ms 先</option><option value="0.2">200 ms 先</option></select></label>
     </div>
     <div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;font-size:13px">
@@ -396,8 +413,9 @@ PANEL_JS = """
       val("mLast").textContent = L && L.cap ? `直近の収録 #${L.cap}: モーション ${L.motion_frames} フレーム、全点見えていた ${(L.valid_frac * 100).toFixed(0)}%` +
         (L.auto_phase != null ? `、自動位相 ${L.auto_phase}°` : "") : "";
       const P = L && L.pred, z = (r, x) => `${r.toFixed(1)}${x < 0 ? "−" : "+"}j${Math.abs(x).toFixed(1)}`;
-      if (P && P.L_Z_R != null) val("mLast").textContent += `　推定 Z（${P.horizon * 1000} ms 先）: 左 ${z(P.L_Z_R, P.L_Z_X)} Ω・右 ${z(P.R_Z_R, P.R_Z_X)} Ω → ` +
-        (P.phase != null ? `指定 ${P.phase}°` : "範囲外なので変えない");
+      if (P && P.L_Z_R != null) val("mLast").textContent += `　推定 Z（${P.horizon * 1000} ms 先）: 左 ${z(P.L_Z_R, P.L_Z_X)} Ω・右 ${z(P.R_Z_R, P.R_Z_X)} Ω`;
+      if (P && P.base != null) val("mLast").textContent += `　初期 ${P.base}° ${P.delta < 0 ? "−" : "+"} 補正 ${Math.abs(P.delta).toFixed(2)}° → ` +
+        (P.phase != null ? `指定 ${P.phase}°` : "90〜270° の外なので変えない");
       const c = s.camera;
       val("mErr").textContent = [s.error, c.error].filter(Boolean).join("　");
       val("mDiag").textContent = s.diag || "（まだフレームを受けていません）";
@@ -1067,12 +1085,15 @@ class Handler(bg.Handler):
                 if q["auto_phase"] and PHASE_MODEL is None:
                     raise RuntimeError("位相のモデルがありません (--phase-model で渡す)")
                 OPTS["auto_phase"] = bool(q["auto_phase"])
+                reset_phase_ref()
                 MOTION.error = ""
             if "horizon" in q:
                 h = float(q["horizon"])
                 if h not in phase_control.HORIZONS:
                     raise ValueError(f"先読みは {phase_control.HORIZONS} s のどれか")
-                OPTS["horizon"] = h                                # 次の収録の予測から効く
+                if h != OPTS["horizon"]:
+                    OPTS["horizon"] = h                            # 次の収録の予測から効く
+                    reset_phase_ref()                              # モデルが変わるので、いまの位相を初期位相に取り直す
             if "record_video" in q:
                 OPTS["record_video"] = bool(q["record_video"])     # 次の記録から効く
             return dict(ok=True)

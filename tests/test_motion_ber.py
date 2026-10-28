@@ -105,26 +105,40 @@ def test_session_join(tmp_path=None):
 
 
 def test_auto_phase_hook(tmp_path=None):
+    """送る位相 = 初期位相 + (モデルの位相 − 基準)。手で位相を変えたら、それが新しい初期位相。"""
     tmp = Path(tmp_path or tempfile.mkdtemp())
     mb.MOTION.close()
     mb.MOTION.buf.clear()
-    mb.PHASE_MODEL = NS(predict_phase=lambda m: 181.234 if m["valid"] > 0.5 else None)
+    vals = iter([200.0, 202.5, None, 199.0, 201.0])
+    mb.PHASE_MODEL = NS(predict_phase=lambda m: next(vals))
     mb.OPTS["auto_phase"] = True
     mb.bg.COMMANDS.clear()
+    mb.bg.STATE.live["phase_deg"] = 175.53                    # 手で合わせた初期位相
     try:
         log = _session(tmp)
-        t = time.perf_counter()
-        mb.MOTION._ingest(t + 0.005, 1, 0.0, None, np.zeros((7, 3)) + 1)
-        mb.CAPTURE.update(t0=t, n=1_000_000, fs=100e6, rx_fs=12.5e6,
-                          res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int), frame_errors=np.zeros(0, int)))
-        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
-        assert mb.bg.STATE.live["phase_deg"] == 181.23
-        assert mb.bg.COMMANDS[-1] == dict(phase_deg=181.23)
-        # 次の収録はこの位相で撮られ、phase_src = auto で残る
-        log.row(dict(t=0, level=0.0, phase=181.23, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
+
+        def cap(phase):
+            t = time.perf_counter()
+            mb.MOTION._ingest(t + 0.005, 1, 0.0, None, np.zeros((7, 3)) + 1)
+            mb.CAPTURE.update(t0=t, n=1_000_000, fs=100e6, rx_fs=12.5e6,
+                              res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int),
+                                       frame_errors=np.zeros(0, int)))
+            log.row(dict(t=0, level=0.0, phase=phase, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
+
+        cap(175.53)                                    # 200 → 基準を取るだけ。位相は変えない
+        assert mb.bg.COMMANDS == [] and mb.REF["base"] == 175.53
+        cap(175.53)                                    # 202.5 → 初期位相 + 2.5
+        assert mb.bg.COMMANDS[-1] == dict(phase_deg=178.03) and mb.bg.STATE.live["phase_deg"] == 178.03
+        cap(178.03)                                    # None (隠れなど) → 変えない
+        assert len(mb.bg.COMMANDS) == 1
+        mb.bg.STATE.live["phase_deg"] = 170.0          # 手で変えた → 新しい初期位相、基準も取り直す
+        cap(170.0)                                     # 199 → 基準
+        assert len(mb.bg.COMMANDS) == 1 and mb.REF["base"] == 170.0
+        cap(170.0)                                     # 201 → 170 + 2
+        assert mb.bg.COMMANDS[-1] == dict(phase_deg=172.0)
         log.close()
         rows = list(csv.DictReader(open(log.dir / "ber_motion.csv", encoding="utf-8")))
-        assert [r["phase_src"] for r in rows] == ["manual", "auto"]
+        assert [r["phase_src"] for r in rows] == ["manual", "manual", "auto", "manual", "manual"]
     finally:
         mb.PHASE_MODEL, mb.OPTS["auto_phase"] = None, False
         mb.bg.STATE.live["phase_deg"] = 180.0
@@ -137,10 +151,11 @@ def test_auto_phase_history_and_info(tmp_path=None):
     mb.MOTION.close()
     mb.MOTION.buf.clear()
     seen = {}
+    vals = iter([200.0, 203.0])
 
     def predict(m):
         seen.update(m)
-        return dict(phase=200.0, L_Z_R=20.0, L_Z_X=-10.0)
+        return dict(phase=next(vals), L_Z_R=20.0, L_Z_X=-10.0)
 
     mb.PHASE_MODEL = NS(predict_phase=predict)
     mb.OPTS.update(auto_phase=True, horizon=0.2)
@@ -156,12 +171,14 @@ def test_auto_phase_history_and_info(tmp_path=None):
         ht, hx = seen["history"]
         assert seen["horizon"] == 0.2 and np.all(np.diff(ht) > 0)
         assert 34 <= hx.shape[0] <= 37 and hx.shape[1:] == (7, 3) and hx[-1, 0, 0] == 59
-        assert mb.bg.COMMANDS[-1] == dict(phase_deg=200.0)
-        assert mb.LAST["pred"]["L_Z_X"] == -10.0
+        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
+        assert mb.bg.COMMANDS == [dict(phase_deg=183.0)]                    # 初期 180° + (203 − 200)
+        assert mb.LAST["pred"]["L_Z_X"] == -10.0 and mb.LAST["pred"]["delta"] == 3.0
         log.close()
         rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
-        assert rows[0]["horizon"] == "0.2" and rows[0]["phase"] == "200" and rows[0]["sent"] == "1"
-        assert rows[0]["L_Z_R"] == "20.0"
+        assert [(r["phase"], r["sent"], r["base"], r["delta"]) for r in rows] == \
+            [("180", "0", "180.0", "0.0"), ("183", "1", "180.0", "3.0")]
+        assert rows[1]["horizon"] == "0.2" and rows[1]["phase_model"] == "203.0" and rows[1]["L_Z_R"] == "20.0"
     finally:
         mb.PHASE_MODEL = None
         mb.OPTS.update(auto_phase=False, horizon=0.1)
