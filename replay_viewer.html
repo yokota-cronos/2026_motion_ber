@@ -4,35 +4,39 @@
 <meta charset="utf-8">
 <title>記録の再生 — BER × モーション</title>
 <style>
-  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --sub:#667085; --line:#e3e6ec;
-          --blue:#1f77b4; --orange:#f28e2b; --red:#d62728; --green:#2ca02c; --purple:#9467bd; }
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --sub:#667085; --line:#e3e6ec; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 "Hiragino Sans","Yu Gothic",system-ui,sans-serif; }
-  header { display:flex; align-items:center; gap:12px; padding:6px 14px; background:#1d2330; color:#fff; flex-wrap:wrap; }
-  header h1 { font-size:16px; margin:0; font-weight:600; }
-  header select { max-width:420px; }
-  #calib { font-size:12px; opacity:.85; margin-left:auto; }
-  main { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; padding:10px 14px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; min-width:0; }
-  .card h2 { font-size:14px; margin:0 0 6px; font-weight:600; }
-  .card h2 small { font-weight:400; color:var(--sub); margin-left:8px; }
-  .col { display:grid; gap:10px; align-content:start; min-width:0; }
-  canvas { width:100%; display:block; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 "Hiragino Sans","Yu Gothic",system-ui,sans-serif;
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:10px; padding:5px 12px; background:#1d2330; color:#fff; flex:none; }
+  header h1 { font-size:15px; margin:0; font-weight:600; white-space:nowrap; }
+  header select { max-width:420px; min-width:0; }
+  #calib { font-size:12px; opacity:.85; margin-left:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 1 画面に収める: 画面の高さから見出しを引いた残りを、左右の列で分ける */
+  main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; padding:8px 12px; }
+  .col { display:flex; flex-direction:column; gap:8px; min-height:0; min-width:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:6px 10px; min-width:0; min-height:0;
+          display:flex; flex-direction:column; }
+  .card h2 { font-size:13px; margin:0 0 4px; font-weight:600; display:flex; align-items:center; gap:8px; flex:none; white-space:nowrap; }
+  .card h2 small { font-weight:400; color:var(--sub); overflow:hidden; text-overflow:ellipsis; }
+  .fill { flex:1; min-height:0; position:relative; }
+  .fill > canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .grow { flex:1; }
   button, select, input { font:inherit; }
-  button { padding:5px 12px; border-radius:6px; border:1px solid #cfd4dc; background:#fff; cursor:pointer; color:var(--ink); }
+  button { padding:3px 10px; border-radius:6px; border:1px solid #cfd4dc; background:#fff; cursor:pointer; color:var(--ink); }
   button.go { background:#1570ef; border-color:#1570ef; color:#fff; }
-  select { padding:4px 6px; border:1px solid #cfd4dc; border-radius:6px; background:#fff; color:var(--ink); }
-  label.chk { display:inline-flex; align-items:center; gap:5px; font-size:13px; color:var(--sub); white-space:nowrap; }
-  .bar { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; }
+  select { padding:2px 6px; border:1px solid #cfd4dc; border-radius:6px; background:#fff; color:var(--ink); }
+  label.chk { display:inline-flex; align-items:center; gap:4px; font-size:12px; color:var(--sub); white-space:nowrap; }
+  .bar { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; flex:none; }
   #time { font-variant-numeric:tabular-nums; font-weight:600; }
-  #seek { width:100%; margin:6px 0 0; }
+  #seek { width:100%; margin:4px 0 0; flex:none; }
   .note { color:var(--sub); font-size:12px; }
-  .pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; }
-  .nums { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; align-items:baseline; font-size:13px; }
+  .pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; min-height:0; }
+  .nums { display:grid; grid-template-columns:auto 1fr; gap:3px 10px; align-items:baseline; font-size:13px; overflow:auto; }
   .nums .k { color:var(--sub); white-space:nowrap; }
   .nums .v { font-variant-numeric:tabular-nums; font-weight:600; }
-  .nums .big { font-size:22px; }
-  @media (max-width:1100px) { main { grid-template-columns:1fr; } }
+  .nums .big { font-size:24px; line-height:1.2; }
 </style>
 </head>
 <body>
@@ -44,19 +48,19 @@
 </header>
 <main>
   <div class="col">
-    <section class="card">
+    <section class="card grow">
       <h2>動画とマーカー<small id="vidInfo"></small></h2>
-      <canvas id="vid"></canvas>
-      <div class="bar" style="margin-top:6px">
+      <div class="fill"><canvas id="vid"></canvas></div>
+      <div class="bar" style="margin-top:4px">
         <label class="chk" title="OptiTrack のマーカーを、較正したカメラで動画に投影した骨格"><input id="showMk" type="checkbox" checked>マーカーの骨格</label>
         <label class="chk" title="MediaPipe が動画から取った骨格（較正に使った対応点）。コマごとに計算するので少し重い"><input id="showMp" type="checkbox">MediaPipe の骨格</label>
         <label class="chk"><input id="showNm" type="checkbox">マーカー名</label>
         <button id="recal" title="MediaPipe でカメラを較正し直す">較正し直す</button>
       </div>
     </section>
-    <section class="card">
+    <section class="card" style="flex:none">
       <div class="bar">
-        <button class="go" id="play" style="min-width:84px">▶ 再生</button>
+        <button class="go" id="play" style="min-width:80px">▶ 再生</button>
         <label class="chk">速さ<select id="speed"><option value="0.02">×0.02</option><option value="0.1">×0.1</option><option value="0.25">×0.25</option><option value="1" selected>×1</option><option value="2">×2</option></select></label>
         <label class="chk" title="BER の収録 (0.1 秒) と収録の間 (転送待ち) を飛ばして、収録の中だけを再生する"><input id="skip" type="checkbox">収録の中だけ</label>
         <button id="capPrev">◀ 収録</button><button id="capNext">収録 ▶</button>
@@ -64,18 +68,17 @@
         <span id="time"></span>
       </div>
       <input id="seek" type="range" min="0" max="1" step="any" value="0">
-      <canvas id="tl" style="height:96px;cursor:pointer"></canvas>
-      <div class="note" id="info"></div>
+      <canvas id="tl" style="height:78px;cursor:pointer;width:100%;display:block"></canvas>
     </section>
   </div>
   <div class="col">
-    <section class="card">
-      <h2>① タグの変調信号 → リーダの出力 → 復調したビット<small id="waveInfo"></small>
-        <label class="chk" style="float:right">表示幅<select id="span"><option value="10" selected>10 µs</option><option value="20">20 µs</option><option value="50">50 µs</option></select></label></h2>
-      <canvas id="wave" style="height:520px"></canvas>
+    <section class="card" style="flex:1.15">
+      <h2>① 送ったビット → リーダ出力 → 復調したビット<small id="waveInfo"></small><span style="margin-left:auto"></span>
+        <label class="chk">表示幅<select id="span"><option value="10" selected>10 µs</option><option value="20">20 µs</option><option value="50">50 µs</option></select></label></h2>
+      <div class="fill"><canvas id="wave"></canvas></div>
     </section>
-    <div class="pair">
-      <section class="card"><h2>③ 復調後の IQ<small id="constInfo"></small></h2><canvas id="iq"></canvas></section>
+    <div class="pair" style="flex:1">
+      <section class="card"><h2>③ 復調後の IQ<small id="constInfo"></small></h2><div class="fill"><canvas id="iq"></canvas></div></section>
       <section class="card"><h2>④ BER</h2><div class="nums" id="nums"></div></section>
     </div>
   </div>
@@ -83,21 +86,21 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const C = { blue:"#1f77b4", orange:"#f28e2b", red:"#d62728", green:"#2ca02c", purple:"#9467bd", ink:"#1d2330", sub:"#667085", grid:"#e8ebf0" };
+const C = { blue:"#1f77b4", orange:"#f28e2b", red:"#d62728", green:"#2ca02c", ink:"#1d2330", sub:"#667085", grid:"#e8ebf0" };
 const R = { meta:null, t:0, playing:false, last:0, drag:false,
-            frBusy:false, frT:-1, frAt:0, panBusy:false, panKey:null, panAt:0, panel:null, ov:null };
-const sci = v => { if (v == null) return "—"; if (v === 0) return "0"; const e = Math.floor(Math.log10(v)); return `${(v / 10 ** e).toFixed(2)}×10${sup(e)}`; };
+            frBusy:false, frT:-1, frAt:0, im:null, ov:null, panBusy:false, panKey:null, panAt:0, panel:null };
 const sup = e => String(e).split("").map(c => "⁻⁰¹²³⁴⁵⁶⁷⁸⁹"["-0123456789".indexOf(c)]).join("");
+const sci = v => { if (v == null) return "—"; if (v === 0) return "0"; const e = Math.floor(Math.log10(v)); return `${(v / 10 ** e).toFixed(2)}×10${sup(e)}`; };
 const fmtT = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(3).padStart(6, "0")}`;
 const capAt = t => R.meta && R.meta.caps.find(c => c.t0 <= t && t <= c.t1);
 
-function prep(cv, h) {
-  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth; h = h || cv.clientHeight;
-  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + "px"; }
+// canvas を表示の大きさに合わせる (枠いっぱい)
+function prep(cv) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
   g.font = '12px "Hiragino Sans",system-ui,sans-serif'; return { g, w, h };
 }
-// 1 枚の canvas の中に軸を 1 つ作る
 function axes(g, box, o) {
   const [X0, Y0, X1, Y1] = box;
   const sx = v => X0 + (v - o.xmin) / (o.xmax - o.xmin) * (X1 - X0);
@@ -106,7 +109,7 @@ function axes(g, box, o) {
   (o.yticks || []).forEach(v => { g.beginPath(); g.moveTo(X0, sy(v)); g.lineTo(X1, sy(v)); g.stroke();
     g.fillStyle = C.sub; g.textAlign = "right"; g.textBaseline = "middle"; g.fillText(String(v), X0 - 4, sy(v)); });
   g.strokeStyle = "#cfd4dc"; g.strokeRect(X0, Y0, X1 - X0, Y1 - Y0);
-  if (o.ylabel) { g.save(); g.translate(X0 - 34, (Y0 + Y1) / 2); g.rotate(-Math.PI / 2); g.textAlign = "center"; g.fillStyle = C.sub; g.fillText(o.ylabel, 0, 0); g.restore(); }
+  if (o.ylabel) { g.save(); g.translate(X0 - 36, (Y0 + Y1) / 2); g.rotate(-Math.PI / 2); g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = C.sub; g.fillText(o.ylabel, 0, 0); g.restore(); }
   return { g, X0, Y0, X1, Y1, sx, sy };
 }
 function line(a, xs, ys, col, lw) {
@@ -114,7 +117,7 @@ function line(a, xs, ys, col, lw) {
   g.strokeStyle = col; g.lineWidth = lw; g.beginPath();
   xs.forEach((x, i) => { const X = a.sx(x), Y = a.sy(ys[i]); i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); g.restore();
 }
-function empty(cv, msg, h) { const { g, w } = prep(cv, h); h = h || cv.clientHeight; g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(msg, w / 2, h / 2); }
+function empty(cv, msg) { const { g, w, h } = prep(cv); g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(msg, w / 2, h / 2); }
 
 // ---------------------------------------------------------------- 記録の一覧と開く
 async function listSessions() {
@@ -123,7 +126,7 @@ async function listSessions() {
   $("sess").innerHTML = L.map(s => `<option value="${s.path}" ${s.name === cur ? "selected" : ""}>${s.name}（収録 ${s.caps}・生 ${s.raw}${s.video ? "・動画" : ""}）</option>`).join("");
 }
 function setMeta(m) {
-  R.meta = m; R.t = m && m.caps.length ? m.caps[0].t0 : 0; R.playing = false; R.frT = -1; R.panKey = null; R.ov = null;
+  R.meta = m; R.t = m && m.caps.length ? m.caps[0].t0 : 0; R.playing = false; R.frT = -1; R.panKey = null; R.ov = null; R.im = null;
   if (!m) return;
   $("seek").max = m.duration;
   $("vidInfo").textContent = `${m.duration.toFixed(1)} 秒・収録 ${m.caps.length}（生データ ${m.n_raw}）・FC/${m.div}・${m.level_dbm} dBm・${m.phase_deg}°`;
@@ -143,97 +146,92 @@ async function loadFrame(t) {
     const img = new Image();
     const imP = R.meta.video ? new Promise(res => { img.onload = () => res(img); img.onerror = () => res(null); img.src = `/api/replay/frame.jpg?t=${t}`; }) : Promise.resolve(null);
     const [ov, im] = await Promise.all([ovP, imP]);
-    R.ov = ov; drawVideo(im, ov);
+    R.ov = ov; R.im = im; drawVideo();
   } catch (e) { } finally { R.frBusy = false; }
 }
-function drawVideo(im, ov) {
-  const cv = $("vid"), W = cv.clientWidth, vw = (ov && ov.w) || (im && im.naturalWidth) || 640, vh = (ov && ov.h) || (im && im.naturalHeight) || 480;
-  const { g, w, h } = prep(cv, Math.round(W * vh / vw));
-  g.fillStyle = "#11151c"; g.fillRect(0, 0, w, h);
-  if (im) g.drawImage(im, 0, 0, w, h); else { g.fillStyle = "#98a2b3"; g.textAlign = "center"; g.fillText("この記録には動画がありません", w / 2, h / 2); }
-  const s = w / vw;
-  // MediaPipe の骨格 (白、細く)
+function drawVideo() {
+  const im = R.im, ov = R.ov, { g, w, h } = prep($("vid"));
+  const vw = (ov && ov.w) || (im && im.naturalWidth) || 640, vh = (ov && ov.h) || (im && im.naturalHeight) || 480;
+  const s = Math.min(w / vw, h / vh), ox = (w - vw * s) / 2, oy = (h - vh * s) / 2;     // 枠に収める (縦横比はそのまま)
+  const X = p => ox + p[0] * s, Y = p => oy + p[1] * s;
+  g.fillStyle = "#11151c"; g.fillRect(ox, oy, vw * s, vh * s);
+  if (im) g.drawImage(im, ox, oy, vw * s, vh * s);
+  else { g.fillStyle = "#98a2b3"; g.textAlign = "center"; g.fillText("この記録には動画がありません", w / 2, h / 2); }
   if (ov && ov.mp && ov.mp.points) {
     const P = ov.mp.points; g.strokeStyle = "rgba(255,255,255,.75)"; g.lineWidth = 1.5;
-    ov.mp.edges.forEach(([a, b]) => { if (!P[a] || !P[b]) return; g.beginPath(); g.moveTo(P[a][0] * s, P[a][1] * s); g.lineTo(P[b][0] * s, P[b][1] * s); g.stroke(); });
-    g.fillStyle = "rgba(255,255,255,.9)"; P.forEach(p => { if (p) { g.beginPath(); g.arc(p[0] * s, p[1] * s, 2, 0, 6.3); g.fill(); } });
+    ov.mp.edges.forEach(([a, b]) => { if (!P[a] || !P[b]) return; g.beginPath(); g.moveTo(X(P[a]), Y(P[a])); g.lineTo(X(P[b]), Y(P[b])); g.stroke(); });
+    g.fillStyle = "rgba(255,255,255,.9)"; P.forEach(p => { if (p) { g.beginPath(); g.arc(X(p), Y(p), 2, 0, 6.3); g.fill(); } });
   }
-  // マーカーの骨格 (較正したカメラで投影)
   const L = R.meta && R.meta.layout;
   if ($("showMk").checked && ov && ov.markers && L) {
     const M = ov.markers; g.lineCap = "round";
     L.bones.forEach(([a, b, col]) => { if (!M[a] || !M[b]) return;
-      g.strokeStyle = "rgba(0,0,0,.45)"; g.lineWidth = 6; g.beginPath(); g.moveTo(M[a][0] * s, M[a][1] * s); g.lineTo(M[b][0] * s, M[b][1] * s); g.stroke();
+      g.strokeStyle = "rgba(0,0,0,.45)"; g.lineWidth = 6; g.beginPath(); g.moveTo(X(M[a]), Y(M[a])); g.lineTo(X(M[b]), Y(M[b])); g.stroke();
       g.strokeStyle = col; g.lineWidth = 3.5; g.stroke(); });
     Object.entries(M).forEach(([n, p]) => { if (!p) return;
-      g.fillStyle = L.colors[n] || "#fff"; g.beginPath(); g.arc(p[0] * s, p[1] * s, 5.5, 0, 6.3); g.fill(); g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.stroke();
+      g.fillStyle = L.colors[n] || "#fff"; g.beginPath(); g.arc(X(p), Y(p), 5.5, 0, 6.3); g.fill(); g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.stroke();
       if ($("showNm").checked) { g.font = '11px system-ui,sans-serif'; g.fillStyle = "#fff"; g.strokeStyle = "rgba(0,0,0,.7)"; g.lineWidth = 3; g.textAlign = "left";
-        g.strokeText(n, p[0] * s + 8, p[1] * s - 6); g.fillText(n, p[0] * s + 8, p[1] * s - 6); } });
+        g.strokeText(n, X(p) + 8, Y(p) - 6); g.fillText(n, X(p) + 8, Y(p) - 6); } });
     const miss = Object.entries(M).filter(([, p]) => !p).map(([n]) => n);
-    if (miss.length) { g.fillStyle = "#ffb4ab"; g.textAlign = "left"; g.font = '12px system-ui,sans-serif'; g.fillText("見えていない: " + miss.join(", "), 8, h - 10); }
+    if (miss.length) { g.fillStyle = "#ffb4ab"; g.textAlign = "left"; g.font = '12px system-ui,sans-serif'; g.fillText("見えていない: " + miss.join(", "), ox + 8, oy + vh * s - 10); }
   }
   const c = ov && ov.calib;
   $("calib").textContent = ov && ov.status ? ov.status : c ? `較正: 誤差 ${c.median_px} px（中央値）・カメラの遅れ ${c.lag_s} s` : "";
 }
 
-// ---------------------------------------------------------------- ① 波形
-function drawWave(P) {
-  const cv = $("wave"), v = P && P.view, wv = v && v.wave, sg = v && v.stages;
+// ---------------------------------------------------------------- ① 送ったビット / リーダ出力 / 復調したビット
+function drawWave() {
+  const P = R.panel, cv = $("wave"), wv = P && P.view && P.view.wave;
   if (!wv) { empty(cv, P && P.cap ? "この収録には生データがありません（波形は出ません）" : "収録の外です（BER と波形があるのは収録の中だけ）"); $("waveInfo").textContent = ""; return; }
   const { g, w, h } = prep(cv), T = wv.span_us, nb = Math.ceil(T / wv.bit_us);
-  const X0 = 64, X1 = w - 10;
-  const boxes = [[X0, 26, X1, h * 0.24], [X0, h * 0.24 + 20, X1, h * 0.60], [X0, h * 0.60 + 22, X1, h - 40]];
-  const bitLines = a => { g.save(); g.setLineDash([3, 3]); g.strokeStyle = "#98a2b3"; g.lineWidth = 1;
-    for (let k = 0; k <= nb; k++) { const x = a.sx(k * wv.bit_us); if (x > a.X1) break; g.beginPath(); g.moveTo(x, a.Y0); g.lineTo(x, a.Y1); g.stroke(); } g.restore(); };
-  const badCols = (a, bits, ref) => { g.fillStyle = "rgba(214,39,40,.12)"; bits.forEach((b, k) => { if (ref[k] !== b) { const x0 = a.sx(k * wv.bit_us), x1 = Math.min(a.X1, a.sx((k + 1) * wv.bit_us)); g.fillRect(x0, a.Y0, x1 - x0, a.Y1 - a.Y0); } }); };
-  const bitRow = (a, bits, ref, y, title, mark) => { g.textAlign = "center"; g.textBaseline = "middle"; g.font = 'bold 13px "Hiragino Sans",system-ui,sans-serif';
-    bits.forEach((b, k) => { const x = a.sx((k + 0.5) * wv.bit_us); if (x > a.X1 - 4) return; const bad = ref[k] !== b;
+  const a = axes(g, [76, 30, w - 10, h - 46], { xmin: 0, xmax: T, ymin: -1, ymax: 1, ylabel: "リーダ出力 [mV]" });
+  const pk = Math.max(1, ...wv.reader_mv.map(Math.abs), ...wv.env_mv) * 1.1;
+  const sy = v => a.Y1 - (v + pk) / (2 * pk) * (a.Y1 - a.Y0);
+  // 縦軸 (mV)
+  g.fillStyle = C.sub; g.textAlign = "right"; g.textBaseline = "middle"; g.strokeStyle = C.grid;
+  [-Math.round(pk * .8), 0, Math.round(pk * .8)].forEach(v => { g.beginPath(); g.moveTo(a.X0, sy(v)); g.lineTo(a.X1, sy(v)); g.stroke(); g.fillText(String(v), a.X0 - 4, sy(v)); });
+  // 誤ったビットの列と、ビットの境目
+  g.fillStyle = "rgba(214,39,40,.13)";
+  wv.got.forEach((b, k) => { if (b !== wv.sent[k]) { const x0 = a.sx(k * wv.bit_us), x1 = Math.min(a.X1, a.sx((k + 1) * wv.bit_us)); g.fillRect(x0, a.Y0, x1 - x0, a.Y1 - a.Y0); } });
+  g.save(); g.setLineDash([3, 3]); g.strokeStyle = "#98a2b3";
+  for (let k = 0; k <= nb; k++) { const x = a.sx(k * wv.bit_us); if (x > a.X1) break; g.beginPath(); g.moveTo(x, a.Y0); g.lineTo(x, a.Y1); g.stroke(); }
+  g.restore();
+  // リーダ出力と包絡線
+  const tt = wv.reader_mv.map((_, i) => i * wv.reader_dt_us), A = { ...a, sy };
+  line(A, tt, wv.reader_mv, C.orange, 1); line(A, tt, wv.env_mv, C.ink, 1.7); line(A, tt, wv.env_mv.map(x => -x), C.ink, 1.7);
+  // 上に送ったビット、下に復調したビット (誤りは赤)
+  const row = (bits, y, title, mark) => {
+    g.textAlign = "center"; g.textBaseline = "middle"; g.font = 'bold 14px "Hiragino Sans",system-ui,sans-serif';
+    bits.forEach((b, k) => { const x = a.sx((k + 0.5) * wv.bit_us); if (x > a.X1 - 4) return; const bad = wv.got[k] !== wv.sent[k];
       g.fillStyle = bad ? C.red : C.ink; g.fillText(bad && mark ? b + "✕" : String(b), x, y); });
-    g.font = '11px "Hiragino Sans",system-ui,sans-serif'; g.textAlign = "right"; g.fillStyle = C.sub; g.fillText(title, a.X0 - 6, y); };
-  // タグ
-  let a = axes(g, boxes[0], { xmin: 0, xmax: T, ymin: -0.4, ymax: 3.7, yticks: [0, 3.3], ylabel: "タグ [V]" });
-  badCols(a, wv.got, wv.sent); bitLines(a); line(a, wv.tag_v.map((_, i) => i * wv.tag_dt_us), wv.tag_v, C.blue, 1.6);
-  bitRow(a, wv.sent, wv.sent, 12, "送ったビット", false);
-  // リーダ
-  const pk = Math.max(1, ...wv.reader_mv.map(Math.abs), ...wv.env_mv) * 1.12;
-  a = axes(g, boxes[1], { xmin: 0, xmax: T, ymin: -pk, ymax: pk, yticks: [-Math.round(pk * .8), 0, Math.round(pk * .8)], ylabel: "リーダ出力 [mV]" });
-  badCols(a, wv.got, wv.sent); bitLines(a);
-  const tt = wv.reader_mv.map((_, i) => i * wv.reader_dt_us);
-  line(a, tt, wv.reader_mv, C.orange, 1); line(a, tt, wv.env_mv, C.ink, 1.6); line(a, tt, wv.env_mv.map(x => -x), C.ink, 1.6);
-  g.fillStyle = C.sub; g.textAlign = "left"; g.textBaseline = "top"; g.fillText("リーダ出力（橙）と包絡線（黒）", a.X0 + 4, a.Y0 + 3);
-  // 復調: 判定軸 I と判定点、復調したビット
-  if (sg && sg.s) {
-    const S = sg.s, m = Math.max(1e-9, ...S.i.map(Math.abs), ...S.pv.map(Math.abs)) * 1.2;
-    a = axes(g, boxes[2], { xmin: 0, xmax: T, ymin: -m, ymax: m, yticks: [0], ylabel: "判定軸 I" });
-    badCols(a, wv.got, wv.sent); bitLines(a); line(a, S.t, S.i, C.purple, 1.5);
-    S.pt.forEach((x, i) => { g.fillStyle = S.bad[i] ? C.red : C.ink; g.beginPath(); g.arc(a.sx(x), a.sy(S.pv[i]), S.bad[i] ? 4.5 : 3, 0, 6.3); g.fill(); });
-    g.fillStyle = C.sub; g.textAlign = "left"; g.textBaseline = "top"; g.fillText("下方変換 + LPF（紫）と判定点（赤 = 誤り）", a.X0 + 4, a.Y0 + 3);
-    bitRow(a, wv.got, wv.sent, a.Y1 + 13, "復調したビット", true);
-  }
-  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "alphabetic";
-  g.fillText(`時間 [µs]（ペイロードの ${wv.first_bit + 1} ビット目から。点線 = ビットの境目、赤い列 = 誤ったビット）`, (X0 + X1) / 2, h - 4);
+    g.font = '12px "Hiragino Sans",system-ui,sans-serif'; g.textAlign = "right"; g.fillStyle = C.sub; g.fillText(title, a.X0 - 6, y);
+  };
+  row(wv.sent, a.Y0 - 14, "送ったビット", false);
+  row(wv.got, a.Y1 + 14, "復調したビット", true);
+  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "alphabetic"; g.font = '11px "Hiragino Sans",system-ui,sans-serif';
+  g.fillText(`時間 [µs]（ペイロードの ${wv.first_bit + 1} ビット目から ${T} µs。橙 = リーダ出力、黒 = 包絡線、赤い列 = 誤ったビット）`, (a.X0 + a.X1) / 2, h - 4);
   $("waveInfo").textContent = `収録 #${P.cap}・フレーム ${P.frame}：誤り ${wv.frame_errors} / ${P.numbers.npay} ビット`;
 }
 // ---------------------------------------------------------------- ③ IQ
-function drawIQ(P) {
-  const cv = $("iq"), c = P && P.view && P.view.const, W = cv.clientWidth;
-  if (!c) { empty(cv, "—", Math.min(300, W)); $("constInfo").textContent = ""; return; }
-  const { g, w, h } = prep(cv, Math.min(300, W)), m = 2, S = Math.min(w, h) - 40, X0 = (w - S) / 2 + 10, Y0 = 10;
+function drawIQ() {
+  const P = R.panel, cv = $("iq"), c = P && P.view && P.view.const;
+  if (!c) { empty(cv, "—"); $("constInfo").textContent = ""; return; }
+  const { g, w, h } = prep(cv), m = 2, S = Math.max(40, Math.min(w - 50, h - 30)), X0 = (w - S) / 2 + 14, Y0 = 4;
   const a = axes(g, [X0, Y0, X0 + S, Y0 + S], { xmin: -m, xmax: m, ymin: -m, ymax: m, yticks: [-1, 0, 1], ylabel: "Q" });
   g.strokeStyle = "#cfd4dc"; g.beginPath(); g.moveTo(a.sx(0), a.Y0); g.lineTo(a.sx(0), a.Y1); g.stroke();
   c.i.forEach((x, k) => { if (c.bad[k]) return; g.fillStyle = "rgba(31,119,180,.45)"; g.fillRect(a.sx(x) - 1, a.sy(c.q[k]) - 1, 2.2, 2.2); });
   c.i.forEach((x, k) => { if (!c.bad[k]) return; g.fillStyle = C.red; g.beginPath(); g.arc(a.sx(x), a.sy(c.q[k]), 3, 0, 6.3); g.fill(); });
-  g.fillStyle = C.sub; g.textAlign = "center"; g.fillText("I（判定軸）", (a.X0 + a.X1) / 2, a.Y1 + 16);
+  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "top"; g.fillText("I（判定軸）", (a.X0 + a.X1) / 2, a.Y1 + 4);
   $("constInfo").textContent = `赤 = 誤り、EVM ${c.evm} %`;
 }
 // ---------------------------------------------------------------- ④ 数値
-function drawNums(P) {
-  const N = P && P.numbers; if (!N) return;
+function drawNums() {
+  const N = R.panel && R.panel.numbers; if (!N) return;
   const col = v => v == null ? C.sub : v < 1e-5 ? C.green : v < 1e-3 ? "#c08400" : C.red;
   const row = (k, v, cls, style) => `<div class="k">${k}</div><div class="v ${cls || ""}" style="${style || ""}">${v}</div>`;
   const r = N.recent, t = N.total, c = N.cap, at = N.at || {};
   let html = row(`現在の BER<br><span class="note">直近 ${r.expected} フレーム</span>`, r.bits ? sci(r.ber) : "—", "big", `color:${col(r.ber)}`);
-  html += row("累積 BER", t.bits ? `${sci(t.ber)} <span class="note">（${t.errors.toLocaleString()} / ${t.bits.toLocaleString()} ビット）</span>` : "—");
+  html += row("累積 BER", t.bits ? `${sci(t.ber)} <span class="note">（${t.errors.toLocaleString()} / ${t.bits.toLocaleString()}）</span>` : "—");
   html += row("この収録", c ? `#${c.cap}：${sci(c.ber)} <span class="note">（${c.frames}/${c.expected} フレーム）</span>` : `<span class="note">収録の外</span>`);
   html += row("このフレーム", at.frame != null ? `${at.frame}：${at.frame_errors < 0 ? "取得失敗" : `誤り ${at.frame_errors} / ${N.npay}`}` : "—");
   if (c) html += row("レベル・位相差", `${c.level >= 0 ? "+" : ""}${c.level} dBm・${c.phase}°`);
@@ -243,23 +241,23 @@ async function loadPanel(t) {
   R.panBusy = true;
   try {
     const P = await (await fetch(`/api/replay/panel?t=${t}&span=${$("span").value}`)).json();
-    if (P.ok !== false) { R.panel = P; drawWave(P); drawIQ(P); drawNums(P); }
+    if (P.ok !== false) { R.panel = P; drawWave(); drawIQ(); drawNums(); }
   } catch (e) { } finally { R.panBusy = false; }
 }
 
 // ---------------------------------------------------------------- タイムライン
 function drawTimeline() {
-  const m = R.meta, cv = $("tl"); const { g, w, h } = prep(cv); if (!m) return;
-  const L = 44, Rr = 10, T = 8, B = 20, d = Math.max(m.duration, 1e-6);
+  const m = R.meta, { g, w, h } = prep($("tl")); if (!m) return;
+  const L = 44, Rr = 10, T = 6, B = 18, d = Math.max(m.duration, 1e-6);
   const x = t => L + (w - L - Rr) * t / d, y = b => T + (h - T - B) * (1 - (Math.log10(Math.max(b, 1e-6)) + 6) / 6);
   g.font = "11px system-ui, sans-serif"; g.fillStyle = C.sub; g.strokeStyle = C.grid;
   for (let e = -6; e <= 0; e += 2) { const yy = y(10 ** e); g.beginPath(); g.moveTo(L, yy); g.lineTo(w - Rr, yy); g.stroke(); g.textAlign = "right"; g.fillText(`1e${e}`, L - 4, yy + 4); }
   const step = [1, 2, 5, 10, 20, 30, 60, 120, 300].find(s => d / s <= 12) || 600; g.textAlign = "center";
-  for (let t = 0; t <= d + 1e-9; t += step) g.fillText(`${t}s`, x(t), h - 5);
+  for (let t = 0; t <= d + 1e-9; t += step) g.fillText(`${t}s`, x(t), h - 4);
   for (const c of m.caps) { const x0 = x(c.t0), ww = Math.max(2, x(c.t1) - x0); g.fillStyle = c.raw ? C.blue : "#98a2b3";
     if (c.ber == null || c.errors === 0) { g.fillRect(x0, h - B - 4, ww, 4); continue; } const yy = y(c.ber); g.fillRect(x0, yy, ww, h - B - yy); }
   g.strokeStyle = C.red; g.lineWidth = 2; g.beginPath(); g.moveTo(x(R.t), T - 4); g.lineTo(x(R.t), h - B + 2); g.stroke();
-  g.fillStyle = C.sub; g.textAlign = "left"; g.fillText("収録ごとの BER（青 = 生データあり）", L + 4, T + 10);
+  g.fillStyle = C.sub; g.textAlign = "left"; g.fillText("収録ごとの BER（青 = 生データあり。クリックでその時刻へ）", L + 4, T + 9);
 }
 $("tl").addEventListener("click", e => { if (!R.meta) return; const b = $("tl").getBoundingClientRect(); seek((e.clientX - b.left - 44) / (b.width - 54) * R.meta.duration, false); });
 
@@ -274,7 +272,8 @@ $("frPrev").onclick = () => seek(R.t - (R.meta.frame_s || 1e-3), true);
 $("frNext").onclick = () => seek(R.t + (R.meta.frame_s || 1e-3), true);
 ["showMk", "showMp", "showNm"].forEach(id => $(id).onchange = () => { R.frT = -1; });
 $("span").onchange = () => { R.panKey = null; };
-window.addEventListener("resize", () => { R.frT = -1; R.panKey = null; });
+// 窓の大きさが変わったら、今のデータのまま描き直す
+new ResizeObserver(() => { drawVideo(); drawWave(); drawIQ(); }).observe(document.querySelector("main"));
 
 function tick(now) {
   const m = R.meta;
@@ -294,8 +293,6 @@ function tick(now) {
     const c = capAt(R.t);
     const key = c ? `${c.cap}:${Math.floor((R.t - c.t0) / (m.frame_s || 1e-3))}` : `out:${m.caps.filter(q => q.t0 <= R.t).length}`;
     if (key !== R.panKey && !R.panBusy && (!R.playing || now - R.panAt > 250)) { R.panKey = key; R.panAt = now; loadPanel(R.t); }
-    const at = R.panel && R.panel.numbers && R.panel.numbers.at;
-    $("info").textContent = c ? `収録 #${c.cap}（${c.raw ? "生データあり" : "生データなし"}）` : "収録の外：モーションと動画だけ";
   }
   R.last = now;
   requestAnimationFrame(tick);
