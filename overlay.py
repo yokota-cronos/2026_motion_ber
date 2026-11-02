@@ -145,12 +145,12 @@ class PersonSegmenter:
         return m
 
 
-def fade_background(bgr: np.ndarray, mask: np.ndarray, keep: float = 0.25, margin: float = 0.045) -> np.ndarray:
+def fade_background(bgr: np.ndarray, mask: np.ndarray, keep: float = 0.25, margin: float = 0.03) -> np.ndarray:
     """人物はそのまま、背景は白へ寄せて薄くする (背景に残す割合 keep)。mask は人物らしさ (0..255)、大きさは問わない。
 
     マスクの値は「人物である確からしさ」なので、そのまま混ぜるとぼけた手 (0.5〜0.7) が半分薄くなる。
-    0.6 以上を人物、0.25 以下を背景として扱う。さらに人物の輪郭から外側へ margin x 幅 (640 px で約 30 px) は
-    薄くせず元の背景のまま残し、その外で 10 px ほどかけて薄くする。輪郭の際まで薄くすると、服の縁と
+    0.6 以上を人物、0.25 以下を背景として扱う。さらに人物の輪郭から外側へ margin x 幅 (640 px で約 20 px) は
+    薄くせず元の背景のまま残し、その外でなめらかに薄くする (2026-11-02 に 30 px -> 20 px に減らした)。輪郭の際まで薄くすると、服の縁と
     背景の境目が分からなくなる (服も背景も白っぽいところで縁が溶けて見えた)。"""
     h, w = bgr.shape[:2]
     a = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255
