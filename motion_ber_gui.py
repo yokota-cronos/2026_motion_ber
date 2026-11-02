@@ -898,6 +898,7 @@ def viewer_overlay(r: replay.Replay, t: float, with_mp: bool) -> dict:
     """時刻 t に出す動画のコマに重ねる点 [px]: マーカー (較正で投影) と、必要なら MediaPipe の骨格。"""
     c = VIEWER["calib"]
     out = dict(w=None, h=None, markers=None, mp=None, status=VIEWER["status"],
+               cut=dict(done=len(CUT["masks"]), total=CUT["total"]) if CUT["dir"] == r.dir else None,
                calib=None if c is None else {k: c[k] for k in ("rms_px", "median_px", "lag_s", "focal_px", "lr_swapped")})
     if not r.has_video:
         return out
@@ -917,6 +918,98 @@ def viewer_overlay(r: replay.Replay, t: float, with_mp: bool) -> dict:
 
 
 _MP = dict(det=None, cache={})
+
+# ---------------------------------------------------------------- 人物の切り出し (背景を薄く)
+# 記録を開くと、動画の全コマの人物のマスクを裏で作り (1 コマ 約 50 ms)、記録フォルダの person_mask.npz に
+# 置く (次からは読むだけ)。まだ作っていないコマは、頼まれたときにその場で作る。マスクは幅 320 px の PNG。
+CUT = dict(dir=None, masks={}, total=0, stop=threading.Event(), thread=None, det=None, lock=threading.Lock(),
+           last=(None, None))
+CUT_FILE = "person_mask.npz"
+CUT_WIDTH = 320
+
+
+def _cut_encode(mask) -> bytes:
+    h, w = mask.shape
+    small = cv2_resize(mask, CUT_WIDTH, int(h * CUT_WIDTH / w))
+    return overlay.cv2.imencode(".png", small)[1].tobytes()
+
+
+def cv2_resize(img, w, h):
+    return overlay.cv2.resize(img, (w, h), interpolation=overlay.cv2.INTER_AREA)
+
+
+def cut_start(r: replay.Replay) -> None:
+    """開いた記録の人物のマスクを、保存したものがあれば読み、無ければ裏で作り始める。"""
+    CUT["stop"].set()
+    if CUT["thread"] is not None:
+        CUT["thread"].join(timeout=5)
+    stop = threading.Event()
+    CUT.update(dir=r.dir, masks={}, total=int(r.tc.size) if r.has_video else 0, stop=stop, thread=None,
+               last=(None, None))
+    if not r.has_video:
+        return
+    f = r.dir / CUT_FILE
+    if f.exists():
+        try:
+            z = np.load(f)
+            blob, off = z["blob"].tobytes(), z["offsets"]
+            CUT["masks"] = {int(k): blob[off[i]:off[i + 1]] for i, k in enumerate(z["frames"])}
+            if len(CUT["masks"]) >= CUT["total"]:
+                return
+        except Exception:                                  # noqa: BLE001 (壊れていたら作り直す)
+            traceback.print_exc()
+            CUT["masks"] = {}
+
+    def run():
+        try:
+            seg = overlay.PersonSegmenter()
+            cap = overlay.cv2.VideoCapture(str(r.video_path))
+            for k in range(CUT["total"]):
+                if stop.is_set():
+                    return
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if k not in CUT["masks"]:
+                    CUT["masks"][k] = _cut_encode(seg.mask(frame))
+            cap.release()
+            if not stop.is_set() and CUT["dir"] == r.dir:
+                ks = sorted(CUT["masks"])
+                blobs = [CUT["masks"][k] for k in ks]
+                off = np.concatenate([[0], np.cumsum([len(b) for b in blobs])]).astype(np.int64)
+                np.savez(r.dir / CUT_FILE, frames=np.array(ks), offsets=off,
+                         blob=np.frombuffer(b"".join(blobs), np.uint8))
+        except Exception:                                  # noqa: BLE001 (切り出し無しでも再生はできる)
+            traceback.print_exc()
+
+    CUT["thread"] = threading.Thread(target=run, daemon=True)
+    CUT["thread"].start()
+
+
+def cut_jpeg(r: replay.Replay, t: float) -> bytes | None:
+    """時刻 t に出すコマで、人物はそのまま・背景は薄くした JPEG (幅 640 px)。"""
+    if not r.has_video:
+        return None
+    k = int(np.clip(np.searchsorted(r.tc, t, side="right") - 1, 0, r.tc.size - 1))
+    if CUT["last"][0] == (str(r.dir), k):
+        return CUT["last"][1]
+    frame = r.frame_bgr(k)
+    if frame is None:
+        return None
+    png = CUT["masks"].get(k)
+    if png is None:                                        # 裏の処理がまだ来ていないコマ: その場で作る
+        with CUT["lock"]:
+            if CUT["det"] is None:
+                CUT["det"] = overlay.PersonSegmenter()
+            png = CUT["masks"][k] = _cut_encode(CUT["det"].mask(frame))
+    mask = overlay.cv2.imdecode(np.frombuffer(png, np.uint8), overlay.cv2.IMREAD_GRAYSCALE)
+    out = overlay.fade_background(frame, mask)
+    h, w = out.shape[:2]
+    if w > replay.STREAM_WIDTH:
+        out = cv2_resize(out, replay.STREAM_WIDTH, int(h * replay.STREAM_WIDTH / w))
+    jpg = overlay.cv2.imencode(".jpg", out, [overlay.cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+    CUT["last"] = ((str(r.dir), k), jpg)
+    return jpg
 
 
 def viewer_mediapipe(r: replay.Replay, k: int):
@@ -1007,7 +1100,7 @@ class Handler(bg.Handler):
         if u.path == "/api/replay/overlay":
             return self._send(viewer_overlay(r, t, q.get("mp", ["0"])[0] == "1"))
         if u.path == "/api/replay/frame.jpg":
-            jpg = r.jpeg(t)
+            jpg = cut_jpeg(r, t) if VIEWER["on"] and q.get("cut", ["0"])[0] == "1" else r.jpeg(t)
             return self._send(jpg, "image/jpeg") if jpg else self._send(b"", "image/jpeg", code=404)
         return self._send(dict(error="not found"), code=404)
 
@@ -1040,6 +1133,7 @@ class Handler(bg.Handler):
                 out = replay_open(str(json.loads(body or b"{}").get("path", "")))
                 if VIEWER["on"]:
                     viewer_calibrate()
+                    cut_start(REPLAY)
                 return self._send(out)
             if u.path == "/api/replay/calibrate":
                 viewer_calibrate(force=True)
@@ -1218,6 +1312,7 @@ def main_viewer(a) -> int:
     fd.load_kernel()
     replay_open(folder)
     viewer_calibrate()
+    cut_start(REPLAY)
 
     def warm():                                          # 受信部の立ち上げ (初回 1 秒強) を先に済ませる
         try:

@@ -98,6 +98,40 @@ class PoseDetector:
         return np.array([(p.x * w, p.y * h, p.visibility) for p in r.pose_landmarks[0]])
 
 
+class PersonSegmenter:
+    """MediaPipe PoseLandmarker の人物の切り出し (segmentation mask)。mask() は人物 = 255 の uint8 (コマと同じ大きさ)。
+
+    1 コマ 約 50 ms (CPU)。再生用の画面で背景を薄くするのに使う。"""
+
+    def __init__(self):
+        import mediapipe as mp
+        from mediapipe.tasks.python import BaseOptions, vision
+        self.mp = mp
+        opt = vision.PoseLandmarkerOptions(base_options=BaseOptions(model_asset_path=str(ensure_model())),
+                                           running_mode=vision.RunningMode.IMAGE, num_poses=1,
+                                           output_segmentation_masks=True)
+        self.lm = vision.PoseLandmarker.create_from_options(opt)
+        self.lock = threading.Lock()
+
+    def mask(self, bgr: np.ndarray) -> np.ndarray:
+        img = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        with self.lock:
+            r = self.lm.detect(img)
+        if not r.segmentation_masks:
+            return np.zeros(bgr.shape[:2], np.uint8)          # 人が写っていない
+        m = r.segmentation_masks[0].numpy_view().squeeze()
+        return np.clip(m * 255, 0, 255).astype(np.uint8)
+
+
+def fade_background(bgr: np.ndarray, mask: np.ndarray, keep: float = 0.25) -> np.ndarray:
+    """人物はそのまま、背景は白へ寄せて薄くする (背景に残す割合 keep)。mask は人物 = 255、大きさは問わない。"""
+    h, w = bgr.shape[:2]
+    a = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255
+    a = cv2.GaussianBlur(a, (0, 0), 1.5)[..., None]               # 縁をなめらかに
+    bg = bgr.astype(np.float32) * keep + 255 * (1 - keep)
+    return (bgr * a + bg * (1 - a)).astype(np.uint8)
+
+
 def detect_frames(video: Path, frames: list[int], det: PoseDetector, progress=None) -> np.ndarray:
     """指定のコマで骨格を取る。(n, 33, 3)、見つからなかったコマは NaN。"""
     cap = cv2.VideoCapture(str(video))
