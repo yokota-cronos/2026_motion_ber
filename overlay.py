@@ -101,32 +101,59 @@ class PoseDetector:
 class PersonSegmenter:
     """MediaPipe PoseLandmarker の人物の切り出し (segmentation mask)。mask() は人物 = 255 の uint8 (コマと同じ大きさ)。
 
-    1 コマ 約 50 ms (CPU)。再生用の画面で背景を薄くするのに使う。"""
+    video=True (動画モード) は前のコマの結果を手がかりに追跡するので、腕を伸ばした・速く動かしたコマでも
+    人を見失わない。2026-11-01 の記録の 400 コマで、画像モードは 28 コマで人ごと消えたが、動画モードは 0
+    (しかも 47 -> 29 ms/コマ と速い)。動画モードはコマを順に、時刻 t_ms を増やしながら渡すこと。
+    ぼけた手は切り出しから外れやすいので、手首・指の位置に沿った帯もマスクに足す。"""
 
-    def __init__(self):
+    HAND_EDGES = ((13, 15), (15, 17), (15, 19), (15, 21), (17, 19),
+                  (14, 16), (16, 18), (16, 20), (16, 22), (18, 20))
+
+    def __init__(self, video: bool = False, confidence: float = 0.5):
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions, vision
-        self.mp = mp
-        opt = vision.PoseLandmarkerOptions(base_options=BaseOptions(model_asset_path=str(ensure_model())),
-                                           running_mode=vision.RunningMode.IMAGE, num_poses=1,
-                                           output_segmentation_masks=True)
+        self.mp, self.video, self.last_ms = mp, video, -1
+        opt = vision.PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=str(ensure_model())),
+            running_mode=vision.RunningMode.VIDEO if video else vision.RunningMode.IMAGE, num_poses=1,
+            output_segmentation_masks=True, min_pose_detection_confidence=confidence,
+            min_pose_presence_confidence=confidence, min_tracking_confidence=confidence)
         self.lm = vision.PoseLandmarker.create_from_options(opt)
         self.lock = threading.Lock()
 
-    def mask(self, bgr: np.ndarray) -> np.ndarray:
+    def mask(self, bgr: np.ndarray, t_ms: int | None = None) -> np.ndarray:
+        h, w = bgr.shape[:2]
         img = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         with self.lock:
-            r = self.lm.detect(img)
+            if self.video:
+                t_ms = max(int(t_ms if t_ms is not None else self.last_ms + 33), self.last_ms + 1)   # 増やし続ける
+                self.last_ms = t_ms
+                r = self.lm.detect_for_video(img, t_ms)
+            else:
+                r = self.lm.detect(img)
         if not r.segmentation_masks:
-            return np.zeros(bgr.shape[:2], np.uint8)          # 人が写っていない
-        m = r.segmentation_masks[0].numpy_view().squeeze()
-        return np.clip(m * 255, 0, 255).astype(np.uint8)
+            return np.zeros((h, w), np.uint8)                 # 人が写っていない
+        m = np.clip(r.segmentation_masks[0].numpy_view().squeeze() * 255, 0, 255).astype(np.uint8)
+        if r.pose_landmarks:                                   # 前腕〜手の帯を足す
+            P = [(p.x * w, p.y * h, p.visibility) for p in r.pose_landmarks[0]]
+            rad = max(4, int(0.08 * np.hypot(P[11][0] - P[12][0], P[11][1] - P[12][1])))
+            band = np.zeros_like(m)
+            for a, b in self.HAND_EDGES:
+                if P[a][2] > 0.3 and P[b][2] > 0.3:
+                    cv2.line(band, (int(P[a][0]), int(P[a][1])), (int(P[b][0]), int(P[b][1])), 255, 2 * rad)
+            m = np.maximum(m, band)
+        return m
 
 
 def fade_background(bgr: np.ndarray, mask: np.ndarray, keep: float = 0.25) -> np.ndarray:
-    """人物はそのまま、背景は白へ寄せて薄くする (背景に残す割合 keep)。mask は人物 = 255、大きさは問わない。"""
+    """人物はそのまま、背景は白へ寄せて薄くする (背景に残す割合 keep)。mask は人物らしさ (0..255)、大きさは問わない。
+
+    マスクの値は「人物である確からしさ」なので、そのまま混ぜるとぼけた手 (0.5〜0.7) が半分薄くなる。
+    0.6 以上を人物、0.25 以下を背景として間をなめらかにつなぎ、縁を数 px 外へ広げてから混ぜる。"""
     h, w = bgr.shape[:2]
     a = cv2.resize(mask, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32) / 255
+    a = np.clip((a - 0.25) / 0.35, 0, 1)
+    a = cv2.dilate(a, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
     a = cv2.GaussianBlur(a, (0, 0), 1.5)[..., None]               # 縁をなめらかに
     bg = bgr.astype(np.float32) * keep + 255 * (1 - keep)
     return (bgr * a + bg * (1 - a)).astype(np.uint8)

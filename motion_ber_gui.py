@@ -922,10 +922,12 @@ _MP = dict(det=None, cache={})
 # ---------------------------------------------------------------- 人物の切り出し (背景を薄く)
 # 記録を開くと、動画の全コマの人物のマスクを裏で作り (1 コマ 約 50 ms)、記録フォルダの person_mask.npz に
 # 置く (次からは読むだけ)。まだ作っていないコマは、頼まれたときにその場で作る。マスクは幅 320 px の PNG。
-CUT = dict(dir=None, masks={}, total=0, stop=threading.Event(), thread=None, det=None, lock=threading.Lock(),
+CUT = dict(dir=None, masks={}, tmp={}, total=0, stop=threading.Event(), thread=None, det=None, lock=threading.Lock(),
            last=(None, None))
 CUT_FILE = "person_mask.npz"
 CUT_WIDTH = 320
+CUT_VERSION = 2          # 2: 動画モードで追跡 + 手の帯 + 抜けたコマを隣で埋める (1 は画像モードで、207/3592 コマ人ごと消えた)
+CUT_FILL = 10            # 人が消えたコマは、前後この数のコマまでで見つかったいちばん近いマスクで埋める
 
 
 def _cut_encode(mask) -> bytes:
@@ -944,7 +946,7 @@ def cut_start(r: replay.Replay) -> None:
     if CUT["thread"] is not None:
         CUT["thread"].join(timeout=5)
     stop = threading.Event()
-    CUT.update(dir=r.dir, masks={}, total=int(r.tc.size) if r.has_video else 0, stop=stop, thread=None,
+    CUT.update(dir=r.dir, masks={}, tmp={}, total=int(r.tc.size) if r.has_video else 0, stop=stop, thread=None,
                last=(None, None))
     if not r.has_video:
         return
@@ -952,33 +954,46 @@ def cut_start(r: replay.Replay) -> None:
     if f.exists():
         try:
             z = np.load(f)
-            blob, off = z["blob"].tobytes(), z["offsets"]
-            CUT["masks"] = {int(k): blob[off[i]:off[i + 1]] for i, k in enumerate(z["frames"])}
-            if len(CUT["masks"]) >= CUT["total"]:
-                return
+            ver = int(z["version"]) if "version" in z.files else 1
+            if ver == CUT_VERSION:                         # 古いやり方で作ったものは作り直す
+                blob, off = z["blob"].tobytes(), z["offsets"]
+                CUT["masks"] = {int(k): blob[off[i]:off[i + 1]] for i, k in enumerate(z["frames"])}
+                if len(CUT["masks"]) >= CUT["total"]:
+                    return
         except Exception:                                  # noqa: BLE001 (壊れていたら作り直す)
             traceback.print_exc()
             CUT["masks"] = {}
 
     def run():
         try:
-            seg = overlay.PersonSegmenter()
+            # 動画モード: 前のコマの結果を手がかりにするので、頭から順に全部通す (途中から始めない)
+            seg = overlay.PersonSegmenter(video=True)
             cap = overlay.cv2.VideoCapture(str(r.video_path))
+            empty = []
             for k in range(CUT["total"]):
                 if stop.is_set():
                     return
                 ok, frame = cap.read()
                 if not ok:
                     break
-                if k not in CUT["masks"]:
-                    CUT["masks"][k] = _cut_encode(seg.mask(frame))
+                m = seg.mask(frame, int(round(r.tc[k] * 1000)))
+                if not m.any():
+                    empty.append(k)
+                CUT["masks"][k] = _cut_encode(m)
+                CUT["tmp"].pop(k, None)
             cap.release()
+            for k in empty:                                # それでも人が消えたコマは、いちばん近いコマのマスクで埋める
+                for dk in range(1, CUT_FILL + 1):
+                    src = next((j for j in (k - dk, k + dk) if j in CUT["masks"] and j not in empty), None)
+                    if src is not None:
+                        CUT["masks"][k] = CUT["masks"][src]
+                        break
             if not stop.is_set() and CUT["dir"] == r.dir:
                 ks = sorted(CUT["masks"])
                 blobs = [CUT["masks"][k] for k in ks]
                 off = np.concatenate([[0], np.cumsum([len(b) for b in blobs])]).astype(np.int64)
-                np.savez(r.dir / CUT_FILE, frames=np.array(ks), offsets=off,
-                         blob=np.frombuffer(b"".join(blobs), np.uint8))
+                np.savez(r.dir / CUT_FILE, frames=np.array(ks), offsets=off, version=np.array(CUT_VERSION),
+                         blob=np.frombuffer(b"".join(blobs), np.uint8), empty_filled=np.array(empty, np.int64))
         except Exception:                                  # noqa: BLE001 (切り出し無しでも再生はできる)
             traceback.print_exc()
 
@@ -996,12 +1011,12 @@ def cut_jpeg(r: replay.Replay, t: float) -> bytes | None:
     frame = r.frame_bgr(k)
     if frame is None:
         return None
-    png = CUT["masks"].get(k)
-    if png is None:                                        # 裏の処理がまだ来ていないコマ: その場で作る
+    png = CUT["masks"].get(k) or CUT["tmp"].get(k)
+    if png is None:                                        # 裏の処理がまだ来ていないコマ: その場で作る (仮。裏が来たら置き換わる)
         with CUT["lock"]:
-            if CUT["det"] is None:
-                CUT["det"] = overlay.PersonSegmenter()
-            png = CUT["masks"][k] = _cut_encode(CUT["det"].mask(frame))
+            if CUT["det"] is None:                         # 1 コマだけなので画像モード。しきい値を下げて見失いにくく
+                CUT["det"] = overlay.PersonSegmenter(video=False, confidence=0.2)
+            png = CUT["tmp"][k] = _cut_encode(CUT["det"].mask(frame))
     mask = overlay.cv2.imdecode(np.frombuffer(png, np.uint8), overlay.cv2.IMREAD_GRAYSCALE)
     out = overlay.fade_background(frame, mask)
     h, w = out.shape[:2]
