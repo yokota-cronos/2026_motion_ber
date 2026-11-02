@@ -251,7 +251,7 @@ def calibrate(rep, progress=None, force: bool = False) -> dict:
     out_json = rep.dir / "overlay_calib.json"
     if out_json.exists() and not force:
         c = json.loads(out_json.read_text(encoding="utf-8"))
-        if c.get("ok") and "outward" in c:                 # 外側へのずらしを入れる前の較正はやり直す
+        if c.get("ok") and "balls" in c:                   # 白い玉で詰める前の較正はやり直す
             return c
     if not rep.has_video or rep.tm.size == 0:
         return dict(ok=False, message="動画かモーションがありません")
@@ -311,8 +311,98 @@ def calibrate(rep, progress=None, force: bool = False) -> dict:
              rms_px=round(best["rms"], 2), median_px=round(best["med"], 2), inliers=best["n_in"], pairs=best["n"], frames_used=n_found,
              frames_sampled=len(frames), seconds=round(time.time() - t0, 1),
              note="ピンホール (主点 = 画面中央、歪みなし)。lag_s = モーションの時刻 = 動画の時刻 - lag_s")
+    say("動画に写ったマーカー (白い玉) で詰めています")
+    c["balls"] = refine_with_balls(rep, c)                 # 詰められなかったときは None (MediaPipe の較正のまま)
+    if c["balls"] is not None:
+        b = c["balls"]
+        c.update(focal_px=b["focal_px"], rvec=b["rvec"], tvec=b["tvec"], median_px=b["median_px"])
     out_json.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
     return c
+
+
+# ---------------------------------------------------------------- 動画に写ったマーカー (白い玉) で詰める
+# MediaPipe の点は関節の中心から作った「マーカーがあるはずの所」の目安で、実際のマーカーとは数 px〜15 px ずれる
+# (2026-11-02 の記録: 投影が白い玉より 15 px 下に出た)。マーカー (反射材の白い玉) は動画にも小さく白く写るので、
+# 投影の近くの白い玉を探して対応にし、カメラを解き直す (焦点距離も探す)。玉は袖の外側の縁、暗い背景の手前に
+# 写ることが多い。服のベージュの線とは色 (彩度) で分ける。2026-11-02 の記録で、玉に対する誤差が中央値
+# 0.75 px・90 % 3.5 px になった (MediaPipe の較正では 6〜8 px)。
+BALL_V_MIN, BALL_S_MAX = 170, 70          # 白い玉: 明るく (HSV の V)、色が薄い (S)。ベージュの線は S が高い
+BALL_RADII = (25, 15, 10)                 # 投影から玉を探す半径 [px、640 px 幅]。だんだん狭める
+BALL_FOCALS = (400, 450, 500, 550, 600, 700, 800)
+BALL_MIN_PAIRS = 60                       # これより玉が見つからなければ、MediaPipe の較正のまま
+BALL_FRAMES = 400                         # 玉を探すコマ数 (動画全体から等間隔)
+
+
+def _white_balls(bgr: np.ndarray) -> np.ndarray:
+    """コマの中の小さく白い丸 (反射マーカーの候補) の中心 (n, 2) [px]。"""
+    sc = bgr.shape[1] / 640
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    m = ((hsv[..., 2] > BALL_V_MIN) & (hsv[..., 1] < BALL_S_MAX)).astype(np.uint8)
+    n, _, st, cen = cv2.connectedComponentsWithStats(m, 8)
+    keep = [cen[i] for i in range(1, n)
+            if 3 * sc * sc <= st[i, 4] <= 60 * sc * sc and max(st[i, 2], st[i, 3]) <= 10 * sc]
+    return np.array(keep).reshape(-1, 2)
+
+
+def refine_with_balls(rep, c: dict) -> dict | None:
+    """較正 c (MediaPipe で求めたもの) を、動画に写った白い玉との対応で詰め直す。足りなければ None。"""
+    w, h = c["width"], c["height"]
+    sc = w / 640
+    n = rep.tc.size
+    frames = sorted(set(np.linspace(0, n - 1, min(BALL_FRAMES, n)).astype(int).tolist()))
+    cap = cv2.VideoCapture(str(rep.video_path))
+    found = {}
+    for k in range(n):                                     # 順に読む (飛ばして読むより速い)
+        ok, f = cap.read()
+        if not ok:
+            break
+        if k in frames:
+            found[k] = _white_balls(f)
+    cap.release()
+    K = lambda f: np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1]], np.float64)
+    rv, tv, focal = np.array(c["rvec"], np.float64), np.array(c["tvec"], np.float64), float(c["focal_px"])
+    best = None
+    for rad in BALL_RADII:
+        X, U = [], []
+        for k, B in found.items():
+            if not len(B):
+                continue
+            i = int(np.clip(np.searchsorted(rep.tm, rep.tc[k] - c["lag_s"]), 0, rep.tm.size - 1))
+            ok = np.nonzero(~np.isnan(rep.xyz[i]).any(axis=1))[0]
+            if not ok.size:
+                continue
+            P, _ = cv2.projectPoints(rep.xyz[i][ok], rv, tv, K(focal), None)
+            P = P.reshape(-1, 2)
+            for jj, p in enumerate(P):
+                dd = np.linalg.norm(B - p, axis=1)
+                a = int(np.argmin(dd))
+                # いちばん近い玉が半径の中にあり、しかもほかのマーカーの投影よりこのマーカーに近いときだけ
+                if dd[a] < rad * sc and int(np.argmin(np.linalg.norm(P - B[a], axis=1))) == jj:
+                    X.append(rep.xyz[i, ok[jj]])
+                    U.append(B[a])
+        if len(X) < BALL_MIN_PAIRS:
+            return None
+        X, U = np.array(X, np.float64), np.array(U, np.float64)
+        best = None
+        for f in BALL_FOCALS:
+            f *= sc
+            okp, rv2, tv2, inl = cv2.solvePnPRansac(X, U, K(f), None, rvec=rv.copy(), tvec=tv.copy(),
+                                                    useExtrinsicGuess=True, reprojectionError=6 * sc, iterationsCount=300)
+            if not okp or inl is None or len(inl) < BALL_MIN_PAIRS:
+                continue
+            rv2, tv2 = cv2.solvePnPRefineLM(X[inl.ravel()], U[inl.ravel()], K(f), None, rv2, tv2)
+            P, _ = cv2.projectPoints(X, rv2, tv2, K(f), None)
+            e = np.linalg.norm(P.reshape(-1, 2) - U, axis=1)
+            if best is None or np.median(e) < best["med"]:
+                best = dict(med=float(np.median(e)), p90=float(np.percentile(e, 90)), f=float(f), rv=rv2, tv=tv2,
+                            pairs=int(len(X)), inliers=int(len(inl)))
+        if best is None:
+            return None
+        rv, tv, focal = best["rv"], best["tv"], best["f"]
+    return dict(focal_px=round(best["f"], 1), rvec=best["rv"].ravel().tolist(), tvec=best["tv"].ravel().tolist(),
+                median_px=round(best["med"], 2), p90_px=round(best["p90"], 1), pairs=best["pairs"],
+                inliers=best["inliers"], frames=len(found),
+                note="動画に写った白い玉 (反射マーカー) に対する誤差。median_px はこちらで上書き")
 
 
 def project(calib: dict, xyz: np.ndarray) -> np.ndarray:
