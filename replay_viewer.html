@@ -229,7 +229,7 @@ function setMeta(m) {
   R.meta = m; R.t = m && m.caps.length ? m.caps[0].t0 : 0; R.playing = false; R.frT = -1; R.panKey = null; R.ov = null; R.im = null;
   if (!m) return;
   $("seek").max = m.duration;
-  [...$("sess").options].forEach(o => { o.selected = o.value.replace(/\/g, "/").endsWith("/" + m.name); });   // 一覧も開いている記録に合わせる
+  [...$("sess").options].forEach(o => { o.selected = o.value.split(/[\\/]/).pop() === m.name; });   // 一覧も開いている記録に合わせる
   $("vidInfo").textContent = T("vidInfo", m);
   document.title = T("docTitle", m.name);
 }
