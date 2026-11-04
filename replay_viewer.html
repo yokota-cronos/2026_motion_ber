@@ -61,7 +61,7 @@
   </div>
   <div class="col">
     <section class="card" style="flex:1.15">
-      <h2><span data-i18n="wave">① 送ったビット → リーダ出力 → 復調したビット</span><small id="waveInfo"></small><span style="margin-left:auto"></span>
+      <h2><span style="margin-left:auto"></span>
         <label class="chk"><span data-i18n="span">表示幅</span><select id="span"><option value="10" selected>10 µs</option><option value="20">20 µs</option><option value="50">50 µs</option></select></label></h2>
       <div class="fill"><canvas id="wave"></canvas></div>
     </section>
@@ -229,6 +229,7 @@ function setMeta(m) {
   R.meta = m; R.t = m && m.caps.length ? m.caps[0].t0 : 0; R.playing = false; R.frT = -1; R.panKey = null; R.ov = null; R.im = null;
   if (!m) return;
   $("seek").max = m.duration;
+  [...$("sess").options].forEach(o => { o.selected = o.value.replace(/\/g, "/").endsWith("/" + m.name); });   // 一覧も開いている記録に合わせる
   $("vidInfo").textContent = T("vidInfo", m);
   document.title = T("docTitle", m.name);
 }
@@ -294,7 +295,7 @@ function drawHeadLabel(g, ov, X, Y, s, box) {
   const top = Math.min(...[ch, ru, lu].filter(Boolean).map(p => p[1]));
   const fs = Math.max(12, Math.round(sw * s * 0.085));
   const yb = Y([0, top - 0.85 * sw]);
-  const l1 = `BER ${N.recent.bits ? sci(ber) : "—"}`, l2 = `${T("phaseShort")} ${fmtPhase(phase)}`;
+  const l1 = `BER ${N.recent.bits ? sci(ber) : "—"}`, l2 = `${T("phaseShort")} ${fmtPhase(phase)}　${fmtRate(R.meta && R.meta.div)}`;
   g.font = `700 ${fs}px "Hiragino Sans",system-ui,sans-serif`;
   const bw = Math.max(g.measureText(l1).width, g.measureText(l2).width) + fs * 1.2, bh = fs * 2.7;
   const [bx0, by0, bx1, by1] = box;                       // 動画の枠
@@ -311,9 +312,9 @@ function drawHeadLabel(g, ov, X, Y, s, box) {
 // ---------------------------------------------------------------- ① 送ったビット / リーダ出力 / 復調したビット
 function drawWave() {
   const P = R.panel, cv = $("wave"), wv = P && P.view && P.view.wave;
-  if (!wv) { empty(cv, !P ? T("loading") : P.cap ? T("noRaw") : T("beforeFirst")); $("waveInfo").textContent = ""; return; }
+  if (!wv) { empty(cv, !P ? T("loading") : P.cap ? T("noRaw") : T("beforeFirst")); return; }
   const { g, w, h } = prep(cv), Tsp = wv.span_us, nb = Math.ceil(Tsp / wv.bit_us);
-  const a = axes(g, [90, 30, w - 10, h - 46], { xmin: 0, xmax: Tsp, ymin: -1, ymax: 1, ylabel: T("reader") });
+  const a = axes(g, [90, 30, w - 10, h - 26], { xmin: 0, xmax: Tsp, ymin: -1, ymax: 1, ylabel: T("reader") });
   const pk = Math.max(1, ...wv.reader_mv.map(Math.abs), ...wv.env_mv) * 1.1;
   const sy = v => a.Y1 - (v + pk) / (2 * pk) * (a.Y1 - a.Y0);
   // 縦軸 (mV)
@@ -337,20 +338,19 @@ function drawWave() {
   };
   row(wv.sent, a.Y0 - 14, T("sent"), false);
   row(wv.got, a.Y1 + 14, T("got"), true);
-  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "alphabetic"; g.font = '11px "Hiragino Sans",system-ui,sans-serif';
-  g.fillText(T("waveAxis", wv.first_bit + 1, Tsp), (a.X0 + a.X1) / 2, h - 4);
-  $("waveInfo").textContent = T("waveInfo", P, wv.frame_errors, P.numbers.npay) + (P.held ? T("held") : "");
 }
 // ---------------------------------------------------------------- ③ IQ
 function drawIQ() {
   const P = R.panel, cv = $("iq"), c = P && P.view && P.view.const;
   if (!c) { empty(cv, "—"); $("constInfo").textContent = ""; return; }
   const { g, w, h } = prep(cv), m = 2, S = Math.max(40, Math.min(w - 50, h - 30)), X0 = (w - S) / 2 + 14, Y0 = 4;
-  const a = axes(g, [X0, Y0, X0 + S, Y0 + S], { xmin: -m, xmax: m, ymin: -m, ymax: m, yticks: [-1, 0, 1], ylabel: "Q" });
+  const a = axes(g, [X0, Y0, X0 + S, Y0 + S], { xmin: -m, xmax: m, ymin: -m, ymax: m, yticks: [-1, 0, 1] });
   g.strokeStyle = "#cfd4dc"; g.beginPath(); g.moveTo(a.sx(0), a.Y0); g.lineTo(a.sx(0), a.Y1); g.stroke();
   c.i.forEach((x, k) => { if (c.bad[k]) return; g.fillStyle = "rgba(31,119,180,.45)"; g.fillRect(a.sx(x) - 1, a.sy(c.q[k]) - 1, 2.2, 2.2); });
   c.i.forEach((x, k) => { if (!c.bad[k]) return; g.fillStyle = C.red; g.beginPath(); g.arc(a.sx(x), a.sy(c.q[k]), 3, 0, 6.3); g.fill(); });
-  g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "top"; g.fillText(T("iAxis"), (a.X0 + a.X1) / 2, a.Y1 + 4);
+  g.fillStyle = C.ink; g.font = '700 15px "Hiragino Sans",system-ui,sans-serif';
+  g.textAlign = "center"; g.textBaseline = "top"; g.fillText("I", (a.X0 + a.X1) / 2, a.Y1 + 4);
+  g.textAlign = "right"; g.textBaseline = "middle"; g.fillText("Q", a.X0 - 26, (a.Y0 + a.Y1) / 2);
   $("constInfo").textContent = T("constInfo", c.evm);
 }
 // ---------------------------------------------------------------- ④ BER と回路図
@@ -362,12 +362,12 @@ function nowValues() {
   return { ber: N.recent.bits ? N.recent.ber : null, phase: N.cap ? N.cap.phase : null, N };
 }
 const fmtPhase = v => v == null ? "—" : `${+v.toFixed(2)}°`;
+// データレート = fc / div (ber_gui の表示と同じ。FC/8 = 13.56 MHz / 8 = 1.695 Mbps)
+const FC_HZ = 13.56e6;
+const fmtRate = div => div ? `${+(FC_HZ / div / 1e6).toFixed(3)} Mbps` : "";
 function drawNums() {
   const { ber, N } = nowValues(); if (!N) return;
-  const t = N.total, c = N.cap;
-  $("ber4").innerHTML = `<div class="note">${T("recent", N.recent.expected)}</div>` +
-    `<div class="val" style="color:${berColor(ber)}">${N.recent.bits ? sci(ber) : "—"}</div>` +
-    `<div class="note">${T("ber4sub", t.bits ? sci(t.ber) : "—", c ? T("capShort", c.cap, sci(c.ber)) : T("beforeFirstShort"))}</div>`;
+  $("ber4").innerHTML = `<div class="val" style="color:${berColor(ber)}">BER: ${N.recent.bits ? sci(ber) : "—"}</div>`;
   drawDiag();
 }
 // 回路図 (assets/coil_drive.png)。電圧源の丸の中心 [px、元の画像]: 左 (256, 564)、右 (454, 566)、半径 43。
