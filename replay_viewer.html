@@ -40,6 +40,8 @@
   .nums .k { color:var(--sub); white-space:nowrap; }
   .nums .v { font-variant-numeric:tabular-nums; font-weight:600; }
   .nums .big { font-size:24px; line-height:1.2; }
+  #ber4 { flex:none; }
+  #ber4 .val { font-size:26px; font-weight:700; line-height:1.15; font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -65,7 +67,7 @@
     </section>
     <div class="pair" style="flex:1">
       <section class="card"><h2><span data-i18n="iq">③ 復調後の IQ</span><small id="constInfo"></small></h2><div class="fill"><canvas id="iq"></canvas></div></section>
-      <section class="card"><h2>④ BER</h2><div class="nums" id="nums"></div></section>
+      <section class="card"><h2>④ BER</h2><div id="ber4"></div><div class="fill"><canvas id="diag"></canvas></div></section>
     </div>
   </div>
 </main>
@@ -129,6 +131,7 @@ const I18N = {
     recent: (n) => `現在の BER<br><span class="note">直近 ${n} フレーム</span>`, total: "累積 BER",
     thisCap: "この収録", prevCap: "直前の収録", frames: (a, b) => `（${a}/${b} フレーム）`, beforeFirstShort: "最初の収録の前",
     thisFrame: "このフレーム", lost: "取得失敗", errs: (e, n) => `誤り ${e} / ${n}`, levelPhase: "レベル・位相差",
+    phaseShort: "位相差", ber4sub: (t, c) => `累積 ${t}　・　${c}`, capShort: (n, b) => `収録 #${n}: ${b}`,
     timeline: "収録ごとの BER（青 = 生データあり。クリックでその時刻へ）",
   },
   en: {
@@ -157,6 +160,7 @@ const I18N = {
     recent: (n) => `Current BER<br><span class="note">last ${n} frame${n === 1 ? "" : "s"}</span>`, total: "Cumulative BER",
     thisCap: "This capture", prevCap: "Previous capture", frames: (a, b) => `(${a}/${b} frames)`, beforeFirstShort: "before the first capture",
     thisFrame: "This frame", lost: "not acquired", errs: (e, n) => `${e} / ${n} errors`, levelPhase: "Level · phase",
+    phaseShort: "Phase", ber4sub: (t, c) => `cumulative ${t}  ·  ${c}`, capShort: (n, b) => `capture #${n}: ${b}`,
     timeline: "BER per capture (blue = raw data saved; click to jump)",
   },
 };
@@ -271,9 +275,37 @@ function drawVideo() {
     const miss = Object.entries(M).filter(([, p]) => !p).map(([n]) => n);
     if (miss.length) { g.fillStyle = "#ffb4ab"; g.textAlign = "left"; g.font = '12px system-ui,sans-serif'; g.fillText(T("missing") + miss.join(", "), ox + 8, oy + vh * s - 10); }
   }
+  drawHeadLabel(g, ov, X, Y, s, [ox, oy, ox + vw * s, oy + vh * s]);
   const c = ov && ov.calib;
   const cut = ov && ov.cut && $("cut").checked && ov.cut.done < ov.cut.total ? "　" + T("cutProgress", ov.cut.done, ov.cut.total) : "";
   $("calib").textContent = (ov && ov.status ? trStatus(ov.status) : c ? T("calib", c) : "") + cut;
+}
+
+// 人物の頭の上に、いまの BER と位相差を書く。位置は投影したマーカー (胸と両上腕) から決める:
+// 胸の真上で、ラベルの下端を肩の高さから 肩幅 x 0.85 上 (頭頂は肩から肩幅の約 0.75 倍上) に置く。
+// 動画の枠からははみ出させない。マーカーが無いときは出さない
+function drawHeadLabel(g, ov, X, Y, s, box) {
+  const M = ov && ov.markers; if (!M) return;
+  const { ber, phase, N } = nowValues(); if (!N) return;
+  const pts = Object.values(M).filter(Boolean); if (!pts.length) return;
+  const ru = M.R_upperarm, lu = M.L_upperarm, ch = M.chest;
+  const sw = ru && lu ? Math.hypot(ru[0] - lu[0], ru[1] - lu[1]) : 80;
+  const cx = ch ? ch[0] : pts.reduce((a, p) => a + p[0], 0) / pts.length;
+  const top = Math.min(...[ch, ru, lu].filter(Boolean).map(p => p[1]));
+  const fs = Math.max(12, Math.round(sw * s * 0.085));
+  const yb = Y([0, top - 0.85 * sw]);
+  const l1 = `BER ${N.recent.bits ? sci(ber) : "—"}`, l2 = `${T("phaseShort")} ${fmtPhase(phase)}`;
+  g.font = `700 ${fs}px "Hiragino Sans",system-ui,sans-serif`;
+  const bw = Math.max(g.measureText(l1).width, g.measureText(l2).width) + fs * 1.2, bh = fs * 2.7;
+  const [bx0, by0, bx1, by1] = box;                       // 動画の枠
+  const x = Math.min(Math.max(X([cx, 0]), bx0 + bw / 2 + 4), bx1 - bw / 2 - 4);
+  const y0 = Math.min(Math.max(yb - bh, by0 + 4), by1 - bh - 4);
+  const bx = x - bw / 2;
+  g.fillStyle = "rgba(29,35,48,.82)"; g.beginPath(); g.roundRect(bx, y0, bw, bh, fs * 0.4); g.fill();
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillStyle = ber == null ? "#cfd4dc" : ber < 1e-5 ? "#7ee08a" : ber < 1e-3 ? "#ffd166" : "#ff8a80";
+  g.fillText(l1, x, y0 + bh * 0.3);
+  g.fillStyle = "#fff"; g.fillText(l2, x, y0 + bh * 0.72);
 }
 
 // ---------------------------------------------------------------- ① 送ったビット / リーダ出力 / 復調したビット
@@ -321,24 +353,45 @@ function drawIQ() {
   g.fillStyle = C.sub; g.textAlign = "center"; g.textBaseline = "top"; g.fillText(T("iAxis"), (a.X0 + a.X1) / 2, a.Y1 + 4);
   $("constInfo").textContent = T("constInfo", c.evm);
 }
-// ---------------------------------------------------------------- ④ 数値
+// ---------------------------------------------------------------- ④ BER と回路図
+const berColor = v => v == null ? C.sub : v < 1e-5 ? C.green : v < 1e-3 ? "#c08400" : C.red;
+// いまの BER (直近のフレーム) と、いまの位相差 [°] (その時刻の収録、収録の間は直前の収録)
+function nowValues() {
+  const N = R.panel && R.panel.numbers;
+  if (!N) return { ber: null, phase: null, N: null };
+  return { ber: N.recent.bits ? N.recent.ber : null, phase: N.cap ? N.cap.phase : null, N };
+}
+const fmtPhase = v => v == null ? "—" : `${+v.toFixed(2)}°`;
 function drawNums() {
-  const N = R.panel && R.panel.numbers; if (!N) return;
-  const col = v => v == null ? C.sub : v < 1e-5 ? C.green : v < 1e-3 ? "#c08400" : C.red;
-  const row = (k, v, cls, style) => `<div class="k">${k}</div><div class="v ${cls || ""}" style="${style || ""}">${v}</div>`;
-  const r = N.recent, t = N.total, c = N.cap, at = N.at || {};
-  let html = row(T("recent", r.expected), r.bits ? sci(r.ber) : "—", "big", `color:${col(r.ber)}`);
-  html += row(T("total"), t.bits ? `${sci(t.ber)} <span class="note">(${t.errors.toLocaleString()} / ${t.bits.toLocaleString()})</span>` : "—");
-  html += row(T(N.held ? "prevCap" : "thisCap"), c ? `#${c.cap}: ${sci(c.ber)} <span class="note">${T("frames", c.frames, c.expected)}</span>` : `<span class="note">${T("beforeFirstShort")}</span>`);
-  html += row(T("thisFrame"), at.frame != null ? `${at.frame}: ${at.frame_errors < 0 ? T("lost") : T("errs", at.frame_errors, N.npay)}` : "—");
-  if (c) html += row(T("levelPhase"), `${c.level >= 0 ? "+" : ""}${c.level} dBm · ${c.phase}°`);
-  $("nums").innerHTML = html;
+  const { ber, N } = nowValues(); if (!N) return;
+  const t = N.total, c = N.cap;
+  $("ber4").innerHTML = `<div class="note">${T("recent", N.recent.expected)}</div>` +
+    `<div class="val" style="color:${berColor(ber)}">${N.recent.bits ? sci(ber) : "—"}</div>` +
+    `<div class="note">${T("ber4sub", t.bits ? sci(t.ber) : "—", c ? T("capShort", c.cap, sci(c.ber)) : T("beforeFirstShort"))}</div>`;
+  drawDiag();
+}
+// 回路図 (assets/coil_drive.png)。電圧源の丸の中心 [px、元の画像]: 左 (256, 564)、右 (454, 566)、半径 43。
+// 左を W1 (基準、0°)、右を W2 (W2 − W1 = 位相差) として、それぞれの横に位相を書く
+const DIAG = { img: new Image(), w: 715, h: 691, src: [[256, 564], [454, 566]], r: 43 };
+DIAG.img.onload = () => drawDiag();
+DIAG.img.src = "/assets/coil_drive.png";
+function drawDiag() {
+  const cv = $("diag"), { g, w, h } = prep(cv);
+  if (!DIAG.img.complete || !DIAG.img.naturalWidth) return;
+  const s = Math.min(w / DIAG.w, h / DIAG.h), ox = (w - DIAG.w * s) / 2, oy = (h - DIAG.h * s) / 2;
+  g.drawImage(DIAG.img, ox, oy, DIAG.w * s, DIAG.h * s);
+  const { phase } = nowValues();
+  const fs = Math.max(13, Math.round(46 * s));
+  g.font = `700 ${fs}px "Hiragino Sans",system-ui,sans-serif`; g.textBaseline = "middle"; g.fillStyle = "#1d2330";
+  const [[x1, y1], [x2, y2]] = DIAG.src, gap = (DIAG.r + 10) * s;
+  g.textAlign = "right"; g.fillText("0°", ox + x1 * s - gap, oy + y1 * s);
+  g.textAlign = "left"; g.fillText(fmtPhase(phase), ox + x2 * s + gap, oy + y2 * s);
 }
 async function loadPanel(t) {
   R.panBusy = true;
   try {
     const P = await (await fetch(`/api/replay/panel?t=${t}&span=${$("span").value}`)).json();
-    if (P.ok !== false) { R.panel = P; drawWave(); drawIQ(); drawNums(); }
+    if (P.ok !== false) { R.panel = P; drawWave(); drawIQ(); drawNums(); drawVideo(); }
   } catch (e) { } finally { R.panBusy = false; }
 }
 
@@ -380,7 +433,7 @@ document.addEventListener("keydown", e => {
 });
 $("span").onchange = () => { R.panKey = null; };
 // 窓の大きさが変わったら、今のデータのまま描き直す
-new ResizeObserver(() => { drawVideo(); drawWave(); drawIQ(); }).observe(document.querySelector("main"));
+new ResizeObserver(() => { drawVideo(); drawWave(); drawIQ(); drawDiag(); }).observe(document.querySelector("main"));
 
 function tick(now) {
   const m = R.meta;

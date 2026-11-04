@@ -1079,6 +1079,11 @@ class Handler(bg.Handler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        if u.path.startswith("/assets/"):                  # 再生用の画面の図 (回路図など)。assets/ の中だけ
+            f = HERE / "assets" / Path(u.path).name
+            if f.suffix.lower() == ".png" and f.is_file():
+                return self._send(f.read_bytes(), "image/png")
+            return self._send(dict(error="not found"), code=404)
         if u.path == "/":
             if VIEWER["on"]:
                 return self._send((HERE / "replay_viewer.html").read_bytes(), "text/html")
