@@ -6,8 +6,12 @@
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --sub:#667085; --line:#e3e6ec; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 "Hiragino Sans","Yu Gothic",system-ui,sans-serif; }
-  header { display:flex; align-items:center; gap:10px; padding:0 12px; height:38px; background:#1d2330; color:#fff; }
+  body { margin:0; background:transparent; color:var(--ink); font:14px/1.45 "Hiragino Sans","Yu Gothic",system-ui,sans-serif; }
+  header { display:flex; align-items:center; gap:10px; padding:0 12px; height:38px; flex:none; background:#1d2330; color:#fff; }
+  /* 録画する範囲 (見出し + 動画 + ①③④) を、いつも 16:9 にする。幅は「画面の幅」と「画面の高さ x 16/9」の
+     小さい方で、真ん中に置く。操作の欄はこの下 (スクロールして使う) */
+  html { background:#d0d5dd; }                     /* 16:9 の枠の外 (録画しない所) は少し濃く */
+  #stage { width:min(100%, calc(100vh * 16 / 9)); aspect-ratio:16 / 9; margin:0 auto; display:flex; flex-direction:column; background:var(--bg); }
   header h1 { font-size:15px; margin:0; font-weight:600; white-space:nowrap; }
   header select { max-width:420px; min-width:0; }
   #calib { font-size:12px; opacity:.85; margin-left:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -15,8 +19,8 @@
   .lang button { border:0; border-radius:0; padding:2px 9px; background:transparent; color:#cfd4dc; font-size:12px; }
   .lang button.on { background:#475467; color:#fff; }
   /* 1 画面目 (画面の高さちょうど) = 見出し + 動画 + ①③④。操作の欄はその下 (スクロールして使う。キーでも操作できる) */
-  main { height:calc(100vh - 38px); display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; padding:8px 12px; }
-  #controls { margin:0 12px 12px; gap:6px; }
+  main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; padding:8px 12px; }
+  #controls { margin:0 auto 12px; width:min(calc(100% - 24px), calc(100vh * 16 / 9 - 24px)); gap:6px; }
   kbd { font:11px ui-monospace,monospace; border:1px solid #cfd4dc; border-bottom-width:2px; border-radius:4px; padding:0 4px; background:#fff; }
   .col { display:flex; flex-direction:column; gap:8px; min-height:0; min-width:0; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:6px 10px; min-width:0; min-height:0;
@@ -45,6 +49,7 @@
 </style>
 </head>
 <body>
+<div id="stage">
 <header>
   <h1 data-i18n="title">記録の再生</h1>
   <select id="sess" data-i18n-title="sessTitle"></select>
@@ -71,6 +76,7 @@
     </div>
   </div>
 </main>
+</div>
 <section class="card" id="controls">
   <div class="bar">
     <label class="chk" data-i18n-title="showMkTitle"><input id="showMk" type="checkbox" checked><span data-i18n="showMk">マーカーの骨格</span></label>
