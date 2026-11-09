@@ -79,15 +79,10 @@ uv run python video/make_figs.py              # CSV から図を描き直す（�
 uv run python video/make_figs.py --from-logs  # 記録フォルダ（~/nfc_vhbr_captures/log）から CSV を作り直してから描く
 ```
 
-カメラの動画だけは、このフォルダの `camera_videos.zip` に入っています。`camera_frames.csv` の時刻は
-`ber_motion.csv`・`motion.csv` と同じ時計（`perf_counter`）なので、BER やモーションと突き合わせられます。
+カメラの動画は `camera_videos.zip` に入っています。`camera_frames.csv` の `t`（各フレームの時刻）は、
+`ber_captures.csv` の `t_start`・`t_end` や `imp_20261101.csv` の `t` と同じく**記録開始からの秒数**なので、
+動画のある場面のときの BER やインピーダンスの推定を、このフォルダの中だけで突き合わせられます。
 
-生データを含む記録フォルダ全体（約 1.9 GB）は、記録フォルダごとの zip にして Google Drive に置きます。
-
-- [Google Drive の記録フォルダ](https://drive.google.com/drive/folders/1NELo1Kkab1Da-zkV7CM_7vmiJ3R7sgG6?usp=drive_link)
-  - `20261102_160447_FC8_600bit_+10dBm_183deg.zip`（補正なし、318 MB）
-  - `20261101_203535_FC8_600bit_+10dBm_183deg.zip`（自動補正あり、1.0 GB）
-
-`~/nfc_vhbr_captures/log/` に展開すると、`uv run motion_ber_gui.py --replay <記録フォルダ名>` で再生でき、
-`--from-logs` で CSV も作り直せます。中身は生データ（`cap_*.ad3`）・動画・モーション・BER の CSV・再生用のキャッシュ、
-左右のラベルを直す前のバックアップ（`_before_fix_lr/`）です。
+生データ（`cap_*.ad3`）を含む記録フォルダ全体（約 1.9 GB）は、このリポジトリには入れていません。
+測定した PC の `~/nfc_vhbr_captures/log/` にあり、そこで `uv run motion_ber_gui.py --replay <記録フォルダ名>` で
+再生したり、`--from-logs` で CSV を作り直したりできます。
