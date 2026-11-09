@@ -72,13 +72,17 @@
 | [imp_20261101.csv](imp_20261101.csv) | 自動補正ありの記録の、収録 1 回ごとのインピーダンスの推定・送った位相・次の収録の BER（図 3） |
 | [summary.json](summary.json) | 上の表の数値 |
 | [make_figs.py](make_figs.py) | CSV と図を作るスクリプト（列の意味も書いてある） |
+| [camera_videos.zip](camera_videos.zip) | 2 つの記録のカメラの動画（`<記録フォルダ名>/camera.mp4`）と、その各フレームの時刻（`camera_frames.csv`）。35 MB |
 
 ```bash
 uv run python video/make_figs.py              # CSV から図を描き直す（このリポジトリだけで動く）
 uv run python video/make_figs.py --from-logs  # 記録フォルダ（~/nfc_vhbr_captures/log）から CSV を作り直してから描く
 ```
 
-記録そのもの（動画・モーション・生データ）は、記録フォルダごとの zip にして Google Drive に置いています。
+カメラの動画だけは、このフォルダの `camera_videos.zip` に入っています。`camera_frames.csv` の時刻は
+`ber_motion.csv`・`motion.csv` と同じ時計（`perf_counter`）なので、BER やモーションと突き合わせられます。
+
+生データを含む記録フォルダ全体（約 1.9 GB）は、記録フォルダごとの zip にして Google Drive に置きます。
 
 - [Google Drive の記録フォルダ](https://drive.google.com/drive/folders/1NELo1Kkab1Da-zkV7CM_7vmiJ3R7sgG6?usp=drive_link)
   - `20261102_160447_FC8_600bit_+10dBm_183deg.zip`（補正なし、318 MB）
