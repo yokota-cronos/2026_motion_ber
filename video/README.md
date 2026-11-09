@@ -78,5 +78,12 @@ uv run python video/make_figs.py              # CSV から図を描き直す（�
 uv run python video/make_figs.py --from-logs  # 記録フォルダ（~/nfc_vhbr_captures/log）から CSV を作り直してから描く
 ```
 
-記録そのもの（動画・モーション・生データ）は `~/nfc_vhbr_captures/log/` にあり、
-`uv run motion_ber_gui.py --replay <記録フォルダ名>` で再生できます。
+記録そのもの（動画・モーション・生データ）は、記録フォルダごとの zip にして Google Drive に置いています。
+
+- [Google Drive の記録フォルダ](https://drive.google.com/drive/folders/1NELo1Kkab1Da-zkV7CM_7vmiJ3R7sgG6?usp=drive_link)
+  - `20261102_160447_FC8_600bit_+10dBm_183deg.zip`（補正なし、318 MB）
+  - `20261101_203535_FC8_600bit_+10dBm_183deg.zip`（自動補正あり、1.0 GB）
+
+`~/nfc_vhbr_captures/log/` に展開すると、`uv run motion_ber_gui.py --replay <記録フォルダ名>` で再生でき、
+`--from-logs` で CSV も作り直せます。中身は生データ（`cap_*.ad3`）・動画・モーション・BER の CSV・再生用のキャッシュ、
+左右のラベルを直す前のバックアップ（`_before_fix_lr/`）です。
