@@ -64,6 +64,7 @@ MARKER_MODEL_ID: int | None = None
 OCCLUSION_ORIGIN_EPS = 1e-6
 BUFFER_SEC = 60.0            # 覚えておくフレーム (360 fps でも 60 秒ぶん)
 STALE_SEC = 1.0              # これだけフレームが来なければ「途絶」
+RECONNECT_SEC = 3.0          # Unicast でこれだけ途絶したら NAT_CONNECT を送り直す (以後この間隔で)
 NEAREST_MAX_GAP = 0.05       # テストフレームとモーションを結び付ける時刻差の上限 [s] (120 fps の 6 フレーム)
 
 
@@ -131,6 +132,9 @@ class MotionStream:
         self.sink = None             # フレームごとに呼ぶ (Frame) -> None。SessionLog が付け外しする
         self._fake_stop = threading.Event()
         self._fake_thread: threading.Thread | None = None
+        self.reconnects = 0          # 途絶して NAT_CONNECT を送り直した回数
+        self._watch_stop = threading.Event()
+        self._watch_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------ 開く / 閉じる
     def set_group(self, key: str) -> None:
@@ -169,6 +173,29 @@ class MotionStream:
             raise RuntimeError("NatNetClient を起動できません。Motive の Data Streaming "
                                "(IP / Unicast・Multicast / Labeled Markers) を確かめてください")
         self.client, self.source = c, "natnet"
+        self.reconnects = 0
+        if not multicast:
+            self._watch_stop.clear()
+            self._watch_thread = threading.Thread(target=self._watch, args=(c, server_ip), daemon=True)
+            self._watch_thread.start()
+
+    def _watch(self, c, server_ip: str) -> None:
+        """Unicast で途絶したら NAT_CONNECT を送り直す。
+
+        Motive は NAT_CONNECT を送ってきたクライアントにだけ Unicast で配信し、keep-alive だけでは
+        登録し直さない。GUI を開いたまま Motive を再起動すると受信が止まったままになる
+        (2026-11-10、11:51 に Motive を起動し直したところで止まり、GUI は keep-alive を送り続けていた)。"""
+        last = 0.0
+        while not self._watch_stop.wait(1.0):
+            f = self.latest()
+            now = time.perf_counter()
+            if (f is None or now - f.t > RECONNECT_SEC) and now - last > RECONNECT_SEC:
+                last = now
+                try:
+                    c.send_request(c.command_socket, c.NAT_CONNECT, "", (server_ip, c.command_port))
+                    self.reconnects += 1
+                except Exception:                # noqa: BLE001 (ソケットを閉じた直後など)
+                    pass
 
     def start_fake(self, fps: float = 120.0) -> None:
         """Motive 無しで GUI と記録を試すための合成データ (腕を振るような動き)。"""
@@ -195,6 +222,10 @@ class MotionStream:
 
     def close(self) -> None:
         self._fake_stop.set()
+        self._watch_stop.set()
+        if self._watch_thread is not None:
+            self._watch_thread.join(timeout=2)
+            self._watch_thread = None
         if self._fake_thread is not None:
             self._fake_thread.join(timeout=2)
             self._fake_thread = None
@@ -316,7 +347,7 @@ class MotionStream:
             markers.append(dict(name=name, pos=p))
         return dict(source=self.source, receiving=self.receiving(), group=self.group,
                     group_label=MARKER_GROUPS[self.group]["label"], fps=round(self.fps(), 1),
-                    frames=self.n_frames, frame=None if f is None else f.frame,
+                    frames=self.n_frames, frame=None if f is None else f.frame, reconnects=self.reconnects,
                     age_ms=None if age is None else round(age * 1e3, 1),
                     markers=markers, diag=self.diag, error=self.error, layout=self.layout(),
                     groups={k: v["label"] for k, v in MARKER_GROUPS.items()})
