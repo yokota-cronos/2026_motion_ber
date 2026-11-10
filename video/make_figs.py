@@ -1,8 +1,12 @@
-"""video/ の CSV と図を作る: 位相の自動補正なし (20261102_160447) とあり (20261101_203535) の BER、
+"""video/ の CSV と図を作る: 位相の自動補正なし (20261110_132859) とあり (20261101_203535) の BER、
 自動補正ありの記録のインピーダンスの推定。
 
     uv run python video/make_figs.py              # CSV から図を描く (このリポジトリだけで動く)
-    uv run python video/make_figs.py --from-logs  # 記録フォルダ (~/nfc_vhbr_captures/log) から CSV を作り直してから描く
+    uv run python video/make_figs.py --from-logs  # 記録フォルダ (~/nfc_vhbr_captures/log) から CSV と zip を作り直してから描く
+
+zip (--from-logs で作る):
+  optitrack.zip      <記録フォルダ名>/motion.csv・ber_motion.csv・motion_conditions.json (OptiTrack のデータ)
+  camera_videos.zip  <記録フォルダ名>/camera.mp4・camera_frames.csv
 
 CSV:
   ber_captures.csv  収録 1 回 (0.05 秒、約 99 フレーム) = 1 行。2 つの記録をまとめたもの
@@ -38,7 +42,7 @@ from matplotlib import font_manager
 HERE = Path(__file__).resolve().parent
 FIG = HERE / "figures"
 LOG = Path.home() / "nfc_vhbr_captures" / "log"
-REC = {"off": "20261102_160447_FC8_600bit_+10dBm_183deg",     # 位相 183° 固定
+REC = {"off": "20261110_132859_FC8_600bit_+10dBm_183deg",     # 位相 183° 固定
        "on": "20261101_203535_FC8_600bit_+10dBm_183deg"}      # インピーダンスの推定で自動補正
 LABEL = {"off": "補正なし（183° 固定）", "on": "自動補正あり"}
 FLOOR = 1e-5                      # これより下 (誤り 0 個) は 1e-5 の線上に白抜きの下向き三角で描く
@@ -81,6 +85,25 @@ def build_csv() -> None:
         w.writerows(out)
     cond = {k: json.load(open(LOG / n / "conditions.json", encoding="utf-8")) for k, n in REC.items()}
     print("CSV を作り直しました:", {k: (c["level_dbm"], c["div"], c["seconds"]) for k, c in cond.items()})
+
+
+ZIPS = {"optitrack.zip": ("motion.csv", "ber_motion.csv", "motion_conditions.json"),
+        "camera_videos.zip": ("camera.mp4", "camera_frames.csv")}
+
+
+def build_zips() -> None:
+    """記録フォルダから OptiTrack のデータとカメラの動画を zip にまとめる (動画はもう圧縮されているので無圧縮で入れる)。"""
+    import zipfile
+    for zname, files in ZIPS.items():
+        with zipfile.ZipFile(HERE / zname, "w") as z:
+            for name in REC.values():
+                cond = json.load(open(LOG / name / "motion_conditions.json", encoding="utf-8"))
+                if cond.get("group") == "upper" and "lr_fixed" not in cond and "motion.csv" in files:
+                    print(f"注意: {name} は fix_lr.py で左右を直していません")
+                for f in files:
+                    z.write(LOG / name / f, f"{name}/{f}",
+                            compress_type=zipfile.ZIP_STORED if f.endswith(".mp4") else zipfile.ZIP_DEFLATED)
+        print(f"{zname} を作り直しました ({(HERE / zname).stat().st_size / 1e6:.1f} MB)")
 
 
 def load(name):
@@ -220,6 +243,7 @@ def main():
     a = ap.parse_args()
     if a.from_logs:
         build_csv()
+        build_zips()
     FIG.mkdir(exist_ok=True)
     rows, imp = load("ber_captures.csv"), load("imp_20261101.csv")
     fig_timeline(rows)
