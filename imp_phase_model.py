@@ -3,7 +3,8 @@
     uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1013ver1.joblib を作る
     uv run motion_ber_gui.py --phase-model imp_phase_model.py  # 画面の「位相の自動調整」で入り切り
 
-手法は ../2026_motion_to_meander_imp/report_20261013_dataset1013ver1.pdf の 4 節 (モーションの先読み) と同じ:
+手法は ../2026_motion_to_meander_imp/report_20261013_dataset1013ver1.pdf の 4 節 (モーションの先読み) と同じ
+(学習データは 1013ver1。1111 の report_20261111_dataset1111.pdf も 4 節が同じ手順):
 
   1. 過去 8 点 (0.02 s 間隔 = 0.14 s 分) のマーカー位置から、h 秒先のマーカー位置を Ridge で予測 (Ridge AR)
   2. 予測した姿勢から片側 6 特徴量を作り、左右それぞれの ExtraTrees で h 秒先のインピーダンスを推定
@@ -12,11 +13,11 @@
 GUI はこの位相の**変化ぶんだけ**を、手で合わせた初期位相に足す (phase_control.py)。なので下の式の
 定数項 (PHASE_OFFSET_DEG、180°) は効かず、効くのは左右の arg Z の差が姿勢でどれだけ動くかだけ。
 
-h は画面で 0.1 s / 0.2 s を選ぶ (motion["horizon"])。レポートでは L_Z_X の RMSE が現在推定 1.49 Ω に対して
-0.1 s 先 1.7 Ω、0.2 s 先 2.3 Ω。
+h は画面で 0.1 s / 0.2 s を選ぶ (motion["horizon"])。レポートの L_Z_X の RMSE は、現在推定 / 0.1 s 先 /
+0.2 s 先で 1013ver1 が 1.49 / 1.74 / 2.36 Ω、1111 が 0.95 / 1.23 / 2.03 Ω。
 
-**レポートとの違い:** レポートは「過去 8 点」「h 秒先」をフレーム数で数えている (VNA の掃引落ちで 16.8 % の
-刻みが欠けているので、0.2 s 指定で実効 0.24 s 程度)。ここではライブで使う都合上、**時刻で数える**
+**レポートとの違い:** レポートは「過去 8 点」「h 秒先」をフレーム数で数えている (VNA の掃引落ちで 1111 は 14.8 %、
+1013ver1 は 16.8 % の刻みが欠けているので、0.2 s 指定で実効 0.23〜0.24 s 程度)。ここではライブで使う都合上、**時刻で数える**
 (学習時も実行時も、マーカーを時刻で線形補間して 0.02 s 刻みに並べ直す)。
 
 位相の決め方 (phase_for_impedance):
@@ -38,7 +39,8 @@ import numpy as np
 from phase_control import HORIZONS, PHASE_OFFSET_DEG  # HORIZONS = 先読み [s]。学習するのも画面で選べるのもこれ
 
 HERE = Path(__file__).resolve().parent
-MODEL_PATH = Path(os.environ.get("IMP_MODEL", HERE / "models" / "imp_1013ver1.joblib"))
+DATASET = "1013ver1"    # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
+MODEL_PATH = Path(os.environ.get("IMP_MODEL", HERE / "models" / f"imp_{DATASET}.joblib"))
 
 W1_COIL = "L"           # リーダ W1 が駆動するコイル (= コイル A、タグ側)。左の体のコイル (2026-10-28 に確認)
 SERIES_OHM = 0.0        # コイルから加算点までの直列抵抗 [Ω]。Z に足してから位相を出す。**要確認**

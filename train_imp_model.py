@@ -3,17 +3,19 @@
 
     uv run train_imp_model.py              # 1013ver1 で学習 → models/imp_1013ver1.joblib
     uv run train_imp_model.py --eval       # 先に 20 ブロック分割で精度を出す (レポートの 4 節と比べる用)
-    uv run train_imp_model.py --trees 500 --leaf 1   # レポートと同じ木 (ファイルが 6.5 GB になる)
+    uv run train_imp_model.py --trees 500 --leaf 1   # レポートと同じ木 (ファイルが数 GB になる)
+    uv run train_imp_model.py --dataset 1111         # 別の学習データ → models/imp_1111.joblib
 
-データと前処理は ../2026_motion_to_meander_imp の report_20261013_dataset1013ver1 と同じものを、
-あちらのコード (src/report0923_common.py) をそのまま呼んで作る:
-  1013_1103_kajihara_13.56MHz.csv、左右チャネルの入れ替え補正、despike、急変フレーム (|dZ/dt| の p99 超) の除外。
+データと前処理は ../2026_motion_to_meander_imp の report_20261013_dataset1013ver1 (1111 は report_20261111_dataset1111。手法は
+同じ) と同じものを、あちらのコード (src/report0923_common.py) をそのまま呼んで作る:
+  1013_1103_kajihara_13.56MHz.csv、左右チャネルの入れ替え補正 (1013ver1・1111 とも逆だった)、despike、
+  急変フレーム (|dZ/dt| の p99 超) の除外。
 違うのは 3 点:
   * 運用のモデルなので、ブロック分割で test に取っておかず**全フレームで学習する** (--eval のときだけ分割する)
   * 先読みの「過去 8 点」「h 秒先」を時刻で数える (imp_phase_model.py の docstring)
-  * ExtraTrees を 100 本・葉の最小サンプル数 5 にした (レポートは 500 本・1)。レポートの分割で比べると
+  * ExtraTrees を 100 本・葉の最小サンプル数 5 にした (レポートは 500 本・1)。1013ver1 では、レポートの分割で比べて
     test の RMSE は 4 ターゲットとも同じか少し良く (L_Z_X 1.487 → 1.459 Ω)、ファイルは 6.5 GB → 約 0.2 GB、
-    1 点の推定は 71 → 13 ms
+    1 点の推定は 71 → 13 ms だった
 """
 from __future__ import annotations
 
@@ -30,8 +32,13 @@ import imp_phase_model as M
 
 HERE = Path(__file__).resolve().parent
 IMP_DIR = Path(os.environ.get("MEANDER_IMP_DIR", HERE.parent / "2026_motion_to_meander_imp"))
-DATASET = "1013ver1"
+DATASET = M.DATASET     # 既定の学習データ。imp_phase_model.MODEL_PATH もこの名前
 SEED = 0
+# --eval で並べるレポート 4 節の値 (20 ブロック分割の test、ET 500 本・葉 1)
+REPORT_RMSE = {
+    "1013ver1": "L_Z_X 現在 1.49 / 0.1 s 先 1.74 / 0.2 s 先 2.36、R_Z_X 2.44 / 2.62 / 3.10",
+    "1111": "L_Z_X 現在 0.95 / 0.1 s 先 1.23 / 0.2 s 先 2.03、R_Z_X 1.22 / 1.40 / 2.02",
+}
 
 
 def load(dataset: str):
@@ -90,7 +97,7 @@ def fit(sessions, idx_by_sess, trees: int, leaf: int):
     return et, ridge
 
 
-def evaluate(sessions, trees: int, leaf: int) -> None:
+def evaluate(sessions, trees: int, leaf: int, dataset: str) -> None:
     """レポートと同じ 20 ブロックのインターリーブ分割 (位相 1、境界 0.5 s) で学習 → test の精度。"""
     from dataset import block_split
 
@@ -101,8 +108,9 @@ def evaluate(sessions, trees: int, leaf: int) -> None:
         tr.append(a[s["ok"][a]])
         te.append(b[s["ok"][b]])
     et, ridge = fit(sessions, tr, trees, leaf)
-    print("\n  test の RMSE [Ω] (レポート 4 節: L_Z_X 現在 1.49 / 0.1 s 先 1.74 / 0.2 s 先 2.36、"
-          "R_Z_X 2.44 / 2.62 / 3.10。あちらはフレーム数で数えている)")
+    ref = REPORT_RMSE.get(dataset)
+    print("\n  test の RMSE [Ω]" + (f" (レポート 4 節の Ridge AR → ET: {ref}。あちらはフレーム数で数えている)"
+                                  if ref else ""))
     print("  " + "".join(f"{n:>9}" for n in ("", *M.TARGETS, "位相°")))
 
     def z_of(P):
@@ -136,14 +144,16 @@ def main() -> int:
     ap.add_argument("--trees", type=int, default=100, help="ExtraTrees の本数 (既定 100。レポートは 500)")
     ap.add_argument("--leaf", type=int, default=5, help="ExtraTrees の葉の最小サンプル数 (既定 5。レポートは 1)")
     ap.add_argument("--eval", action="store_true", help="保存の前に 20 ブロック分割で精度を出す")
-    ap.add_argument("--out", type=Path, default=M.MODEL_PATH)
+    ap.add_argument("--out", type=Path, help="既定は models/imp_<dataset>.joblib (環境変数 IMP_MODEL があればそれ)")
     a = ap.parse_args()
+    if a.out is None:
+        a.out = M.MODEL_PATH if a.dataset == DATASET else HERE / "models" / f"imp_{a.dataset}.joblib"
 
     print(f"データセット {a.dataset} を読む ({IMP_DIR})")
     sessions, thresh = load(a.dataset)
     if a.eval:
         print("\n評価 (20 ブロック分割)")
-        evaluate(sessions, a.trees, a.leaf)
+        evaluate(sessions, a.trees, a.leaf, a.dataset)
     print("全フレームで学習")
     et, ridge = fit(sessions, [np.where(s["ok"])[0] for s in sessions], a.trees, a.leaf)
 
