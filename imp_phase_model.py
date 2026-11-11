@@ -1,10 +1,10 @@
 """imp_phase_model.py -- モーション → 先のインピーダンス → W2−W1 位相差 (`--phase-model` に渡すモデル)。
 
-    uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1013ver1.joblib を作る
+    uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1111.joblib を作る
     uv run motion_ber_gui.py --phase-model imp_phase_model.py  # 画面の「位相の自動調整」で入り切り
 
 手法は ../2026_motion_to_meander_imp/report_20261013_dataset1013ver1.pdf の 4 節 (モーションの先読み) と同じ
-(学習データは 1013ver1。1111 の report_20261111_dataset1111.pdf も 4 節が同じ手順):
+(学習データは 1111。report_20261111_dataset1111.pdf も 4 節が同じ手順):
 
   1. 過去 8 点 (0.02 s 間隔 = 0.14 s 分) のマーカー位置から、h 秒先のマーカー位置を Ridge で予測 (Ridge AR)
   2. 予測した姿勢から片側 6 特徴量を作り、左右それぞれの ExtraTrees で h 秒先のインピーダンスを推定
@@ -39,7 +39,7 @@ import numpy as np
 from phase_control import HORIZONS, PHASE_OFFSET_DEG  # HORIZONS = 先読み [s]。学習するのも画面で選べるのもこれ
 
 HERE = Path(__file__).resolve().parent
-DATASET = "1013ver1"    # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
+DATASET = "1111"        # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
 MODEL_PATH = Path(os.environ.get("IMP_MODEL", HERE / "models" / f"imp_{DATASET}.joblib"))
 
 W1_COIL = "L"           # リーダ W1 が駆動するコイル (= コイル A、タグ側)。左の体のコイル (2026-10-28 に確認)

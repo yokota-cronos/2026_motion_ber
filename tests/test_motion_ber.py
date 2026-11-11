@@ -198,9 +198,9 @@ def test_imp_phase_model():
     assert M.spans_ok(t, 0.1, 0.25)[0] and not M.spans_ok(np.delete(t, [12, 13, 14, 15, 16, 17]), 0.1, 0.25)[0]
     assert not M.spans_ok(t, -0.01, 0.2)[0]                                   # 履歴が足りない
 
-    csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1013_1103_kajihara_13.56MHz.csv"
+    csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1111_1547_kajihara_@13.56MHz.csv"
     if not M.MODEL_PATH.exists() or not csv_path.exists():
-        print("  (学習済みモデルか 1013 の CSV が無いので、推定は確かめない)")
+        print("  (学習済みモデルか 1111 の CSV が無いので、推定は確かめない)")
         return
     rows = list(csv.DictReader(open(csv_path, encoding="utf-8")))[3000:3100]
     names = motion.MARKER_GROUPS["upper"]["names"]                            # Motive の配信順 (MARKERS とは違う)
@@ -209,7 +209,7 @@ def test_imp_phase_model():
     sel = (ts > ts[40] - 0.3) & (ts <= ts[40])
     out = M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1))
     assert out is not None
-    # 0.1 s 先の実測 (入れ替え補正つき: CSV の leftbody が右のコイル)
+    # 0.1 s 先の実測 (入れ替え補正つき: 1111 も CSV の leftbody が右のコイル)
     k = int(np.searchsorted(ts, ts[40] + 0.1))
     real = [float(rows[k][c]) for c in ("rightbody_Z_R_13.56", "rightbody_Z_X_13.56",
                                         "leftbody_Z_R_13.56", "leftbody_Z_X_13.56")]

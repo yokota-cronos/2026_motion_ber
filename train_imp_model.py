@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """train_imp_model.py -- imp_phase_model.py が使うモデル (Ridge AR + ExtraTrees) を学習して保存する。
 
-    uv run train_imp_model.py              # 1013ver1 で学習 → models/imp_1013ver1.joblib
+    uv run train_imp_model.py              # 1111 で学習 → models/imp_1111.joblib
     uv run train_imp_model.py --eval       # 先に 20 ブロック分割で精度を出す (レポートの 4 節と比べる用)
     uv run train_imp_model.py --trees 500 --leaf 1   # レポートと同じ木 (ファイルが数 GB になる)
-    uv run train_imp_model.py --dataset 1111         # 別の学習データ → models/imp_1111.joblib
+    uv run train_imp_model.py --dataset 1013ver1     # 別の学習データ → models/imp_1013ver1.joblib
 
-データと前処理は ../2026_motion_to_meander_imp の report_20261013_dataset1013ver1 (1111 は report_20261111_dataset1111。手法は
+データと前処理は ../2026_motion_to_meander_imp の report_20261111_dataset1111 (1013ver1 は report_20261013_dataset1013ver1。手法は
 同じ) と同じものを、あちらのコード (src/report0923_common.py) をそのまま呼んで作る:
-  1013_1103_kajihara_13.56MHz.csv、左右チャネルの入れ替え補正 (1013ver1・1111 とも逆だった)、despike、
+  1111_1547_kajihara_@13.56MHz.csv、左右チャネルの入れ替え補正 (1013ver1・1111 とも逆だった)、despike、
   急変フレーム (|dZ/dt| の p99 超) の除外。
 違うのは 3 点:
   * 運用のモデルなので、ブロック分割で test に取っておかず**全フレームで学習する** (--eval のときだけ分割する)
