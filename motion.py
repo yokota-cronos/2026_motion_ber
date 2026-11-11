@@ -35,7 +35,10 @@ NATNET_DIR = Path(os.environ.get(
 # sync_optitrack_nanovna.py の MARKER_GROUPS と同じ。names は Motive の配信順 (= marker_id 1..7)。
 MARKER_GROUPS = {
     "upper": {"label": "上半身",
-              "names": ["chest", "R_upperarm", "L_upperarm", "R_joint", "R_forearm", "L_forearm", "L_joint"]},
+              # 2026-11-11 に左右を直した (アセット 0728_1233_7points_back の marker_id 2/4/5 が本人の左腕、
+              # 3/6/7 が右腕。それまでは R/L を逆に付けていた。右腕だけ上げて確認)。
+              # それより前の記録・学習データ (1013ver1・1111 を含む) はこの前の並び = 左右逆で名前が付いている
+              "names": ["chest", "L_upperarm", "R_upperarm", "L_joint", "L_forearm", "R_forearm", "R_joint"]},
     "lower": {"label": "下半身",
               "names": ["waist", "L_shin", "L_thigh", "R_thigh", "L_knee", "R_knee", "R_shin"]},
 }

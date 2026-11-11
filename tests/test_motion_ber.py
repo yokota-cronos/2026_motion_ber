@@ -73,7 +73,7 @@ def test_session_join(tmp_path=None):
     for k in range(12):
         xyz = np.tile([0.0, 1.0, 0.0], (7, 1)) + [k * 1e-3, 0, 0]
         if k == 5:
-            xyz[2] = np.nan
+            xyz[mb.MOTION.names.index("L_upperarm")] = np.nan
         mb.MOTION._ingest(t_cap + k / 120, 1000 + k, k / 120, 5000 + k, xyz)
     rx_fs = 100e6 / 8
     st = np.arange(0, 1_000_000, 4000, dtype=np.int64)            # 250 フレーム
@@ -170,7 +170,8 @@ def test_auto_phase_history_and_info(tmp_path=None):
         log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
         ht, hx = seen["history"]
         assert seen["horizon"] == 0.2 and np.all(np.diff(ht) > 0)
-        assert seen["names"][1] == "L_upperarm" and seen["names"][0] == "chest"     # 左右逆のラベルを本人の左右に
+        assert seen["names"] == tuple(mb.phase_control.swap_lr(n) for n in mb.MOTION.names)   # 左右逆のラベルを本人の左右に
+        assert seen["names"][0] == "chest"
         assert 34 <= hx.shape[0] <= 37 and hx.shape[1:] == (7, 3) and hx[-1, 0, 0] == 59
         log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
         assert mb.bg.COMMANDS == [dict(phase_deg=183.0)]                    # 初期 180° + (203 − 200)
@@ -478,7 +479,7 @@ def test_fix_lr_flips(tmp_path=None):
     mb.MOTION.close()
     mb.MOTION.buf.clear()
     log = _session(tmp)
-    names = list(mb.MOTION.names)                     # chest, R_upperarm, L_upperarm, R_joint, R_forearm, L_forearm, L_joint
+    names = list(mb.MOTION.names)                     # motion.MARKER_GROUPS["upper"] の並び (Motive の配信順)
     R, L = names.index("R_joint"), names.index("L_joint")
     for k in range(100):                              # 0.5 s で右と左が入れ替わる
         xyz = np.zeros((7, 3))
@@ -509,7 +510,7 @@ def test_fix_lr_flips(tmp_path=None):
     assert float(b[0]["R_joint_X"]) == -0.2 and float(b[0]["R_joint_dev"]) == 0.0          # 収録窓 (後半) も直る
     assert fix_lr.detect_flips(d) == {k: [] for k in flips}
     fix_lr.fix(d)                                     # 続けて名前の入れ替えもかけられる
-    assert json.loads((d / "motion_conditions.json").read_text(encoding="utf-8"))["marker_names"][1] == "L_upperarm"
+    assert json.loads((d / "motion_conditions.json").read_text(encoding="utf-8"))["marker_names"] == [mb.phase_control.swap_lr(n) for n in names]
     fix_lr.undo(d)                                    # どちらも、いちばん元に戻る
     assert (d / "motion.csv").read_text(encoding="utf-8") == before
 
