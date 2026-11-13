@@ -49,6 +49,13 @@
   .nums .big { font-size:24px; line-height:1.2; }
   #ber4 { flex:none; }
   #ber4 .val { font-size:26px; font-weight:700; line-height:1.15; font-variant-numeric:tabular-nums; }
+  /* 動画のみ (?mode=video、見出しの「動画のみ」): ①③④ を隠し、録画した動画だけを 16:9 の枠いっぱいに出す */
+  body.vonly main { grid-template-columns:minmax(0,1fr); padding:0; gap:0; }
+  body.vonly main > .col:nth-child(2) { display:none; }
+  body.vonly #vidCard { border:0; border-radius:0; padding:0; background:#11151c; }
+  body.vonly #vidCard > h2 { display:none; }
+  header button.mode { padding:2px 9px; font-size:12px; background:transparent; color:#cfd4dc; border-color:#475467; }
+  header button.mode.on { background:#475467; color:#fff; }
 </style>
 </head>
 <body>
@@ -58,11 +65,12 @@
   <select id="sess" data-i18n-title="sessTitle"></select>
   <button id="open" data-i18n="open">開く</button>
   <span id="calib"></span>
+  <button id="vonly" class="mode" data-i18n="vonly" data-i18n-title="vonlyTitle">動画のみ</button>
   <span class="lang" title="表示言語 / Language"><button id="langJP">JP</button><button id="langEN">EN</button></span>
 </header>
 <main>
   <div class="col">
-    <section class="card grow">
+    <section class="card grow" id="vidCard">
       <h2><span data-i18n="video">動画とマーカー</span><small id="vidInfo"></small></h2>
       <div class="fill"><canvas id="vid"></canvas></div>
     </section>
@@ -115,7 +123,7 @@ const capAt = t => R.meta && R.meta.caps.find(c => c.t0 <= t && t <= c.t1);
 // 文言はすべてここ。関数のものは数を差し込む。HTML は data-i18n (中身) / data-i18n-title (title) で引く
 const I18N = {
   jp: {
-    title: "記録の再生", open: "開く", sessTitle: "記録フォルダ（~/nfc_vhbr_captures/log/）",
+    title: "記録の再生", open: "開く", vonly: "動画のみ", vonlyTitle: "録画した動画だけを出す（骨格・BER・位相差・背景の処理なし。キー V。?mode=video で開いても選べる）", sessTitle: "記録フォルダ（~/nfc_vhbr_captures/log/）",
     video: "動画とマーカー", showMk: "マーカーの骨格", showMp: "MediaPipe の骨格", showNm: "マーカー名",
     showMkTitle: "OptiTrack のマーカーを、較正したカメラで動画に投影した骨格",
     showMpTitle: "MediaPipe が動画から取った骨格（較正に使った対応点）。コマごとに計算するので少し重い",
@@ -124,7 +132,7 @@ const I18N = {
     capPrev: "◀ 収録", capNext: "収録 ▶", frPrev: "◀ フレーム", frNext: "フレーム ▶", play: "▶ 再生", pause: "❚❚ 停止",
     cut: "人物だけ（背景を薄く）", cutTitle: "MediaPipe で人物を切り出し、背景を薄くする。初めて開いた記録は裏で全コマを処理する（2 分の動画で約 3 分）",
     cutProgress: (a, b) => `人物の切り出し ${a}/${b}`,
-    keys: "キー操作: <kbd>Space</kbd> 再生 / 停止　<kbd>←</kbd><kbd>→</kbd> 1 フレーム　<kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> 1 収録",
+    keys: "キー操作: <kbd>Space</kbd> 再生 / 停止　<kbd>←</kbd><kbd>→</kbd> 1 フレーム　<kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> 1 収録　<kbd>V</kbd> 動画のみ / 全部",
     wave: "① 送ったビット → リーダ出力 → 復調したビット", span: "表示幅", iq: "③ 復調後の IQ",
     sessOpt: (s) => `${s.name}（収録 ${s.caps}・生 ${s.raw}${s.video ? "・動画" : ""}）`,
     vidInfo: (m) => `${m.duration.toFixed(1)} 秒・収録 ${m.caps.length}（生データ ${m.n_raw}）・FC/${m.div}・${m.level_dbm} dBm・${m.phase_deg}°`,
@@ -144,7 +152,7 @@ const I18N = {
     timeline: "収録ごとの BER（青 = 生データあり。クリックでその時刻へ）",
   },
   en: {
-    title: "Replay", open: "Open", sessTitle: "Recording folder (~/nfc_vhbr_captures/log/)",
+    title: "Replay", open: "Open", vonly: "Video only", vonlyTitle: "Show only the recorded video (no skeleton, BER, phase or background fade; key V; also ?mode=video)", sessTitle: "Recording folder (~/nfc_vhbr_captures/log/)",
     video: "Video and markers", showMk: "Marker skeleton", showMp: "MediaPipe skeleton", showNm: "Marker names",
     showMkTitle: "OptiTrack markers projected onto the video with the calibrated camera",
     showMpTitle: "Skeleton detected by MediaPipe (the points used for calibration). Computed per frame, so a little slow",
@@ -153,7 +161,7 @@ const I18N = {
     capPrev: "◀ Capture", capNext: "Capture ▶", frPrev: "◀ Frame", frNext: "Frame ▶", play: "▶ Play", pause: "❚❚ Pause",
     cut: "Person only (fade background)", cutTitle: "Cut out the person with MediaPipe and fade the background. A recording opened for the first time is processed in the background (about 3 min for a 2-min video)",
     cutProgress: (a, b) => `Person cut-out ${a}/${b}`,
-    keys: "Keys: <kbd>Space</kbd> play / pause　<kbd>←</kbd><kbd>→</kbd> one frame　<kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> one capture",
+    keys: "Keys: <kbd>Space</kbd> play / pause　<kbd>←</kbd><kbd>→</kbd> one frame　<kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> one capture　<kbd>V</kbd> video only / all",
     wave: "① Sent bits → reader output → demodulated bits", span: "Span", iq: "③ IQ after demodulation",
     sessOpt: (s) => `${s.name} (${s.caps} captures, ${s.raw} raw${s.video ? ", video" : ""})`,
     vidInfo: (m) => `${m.duration.toFixed(1)} s · ${m.caps.length} captures (${m.n_raw} raw) · FC/${m.div} · ${m.level_dbm} dBm · ${m.phase_deg}°`,
@@ -195,6 +203,17 @@ function applyLang() {
   document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = T(el.dataset.i18nTitle); });
   $("keys").innerHTML = T("keys");
   $("langJP").classList.toggle("on", LANG === "jp"); $("langEN").classList.toggle("on", LANG === "en");
+}
+// 動画のみ (①③④ を隠す)。ブラウザに覚える。?mode=video / ?mode=all で開いても選べる
+let VONLY = false;
+try { VONLY = localStorage.getItem("replayMode") === "video"; } catch (e) { }
+{ const q = new URLSearchParams(location.search).get("mode"); if (q === "video" || q === "all") VONLY = q === "video"; }
+function setVonly(v) {
+  VONLY = v; try { localStorage.setItem("replayMode", v ? "video" : "all"); } catch (e) { }
+  document.body.classList.toggle("vonly", v); $("vonly").classList.toggle("on", v);
+  ["showMk", "showMp", "showNm", "cut", "recal"].forEach(id => { $(id).disabled = v; });   // 動画のみでは効かない
+  R.frT = -1; R.panKey = null;                   // 動画 (重ね描きの有無) と ①③④ を読み直す
+  drawVideo(); if (!v) { drawWave(); drawIQ(); drawNums(); }
 }
 function setLang(l) {
   LANG = l; try { localStorage.setItem("replayLang", l); } catch (e) { }
@@ -252,9 +271,10 @@ $("recal").onclick = () => fetch("/api/replay/calibrate", { method: "POST", body
 async function loadFrame(t) {
   R.frBusy = true; R.frT = t;
   try {
-    const ovP = fetch(`/api/replay/overlay?t=${t}&mp=${$("showMp").checked ? 1 : 0}`).then(r => r.json());
+    // 動画のみのときは録画そのまま (骨格・背景の処理なし) なので、重ね描きの情報は取らない
+    const ovP = VONLY ? Promise.resolve(null) : fetch(`/api/replay/overlay?t=${t}&mp=${$("showMp").checked ? 1 : 0}`).then(r => r.json());
     const img = new Image();
-    const imP = R.meta.video ? new Promise(res => { img.onload = () => res(img); img.onerror = () => res(null); img.src = `/api/replay/frame.jpg?t=${t}&cut=${$("cut").checked ? 1 : 0}`; }) : Promise.resolve(null);
+    const imP = R.meta.video ? new Promise(res => { img.onload = () => res(img); img.onerror = () => res(null); img.src = `/api/replay/frame.jpg?t=${t}&cut=${$("cut").checked && !VONLY ? 1 : 0}`; }) : Promise.resolve(null);
     const [ov, im] = await Promise.all([ovP, imP]);
     R.ov = ov; R.im = im; drawVideo();
   } catch (e) { } finally { R.frBusy = false; }
@@ -266,7 +286,8 @@ function drawVideo() {
   const X = p => ox + p[0] * s, Y = p => oy + p[1] * s;
   g.fillStyle = "#11151c"; g.fillRect(ox, oy, vw * s, vh * s);
   if (im) g.drawImage(im, ox, oy, vw * s, vh * s);
-  else { g.fillStyle = "#98a2b3"; g.textAlign = "center"; g.fillText(T(R.meta && R.meta.video && !R.ov ? "loading" : "noVideo"), w / 2, h / 2); }
+  else { g.fillStyle = "#98a2b3"; g.textAlign = "center"; g.fillText(T(R.meta && R.meta.video && !R.ov && !VONLY ? "loading" : "noVideo"), w / 2, h / 2); }
+  if (VONLY) { $("calib").textContent = ""; return; }                    // 動画のみ: 何も重ねない
   if (ov && ov.mp && ov.mp.points) {
     const P = ov.mp.points; g.strokeStyle = "rgba(255,255,255,.75)"; g.lineWidth = 1.5;
     ov.mp.edges.forEach(([a, b]) => { if (!P[a] || !P[b]) return; g.beginPath(); g.moveTo(X(P[a]), Y(P[a])); g.lineTo(X(P[b]), Y(P[b])); g.stroke(); });
@@ -434,6 +455,7 @@ $("frNext").onclick = () => seek(R.t + (R.meta.frame_s || 1e-3), true);
 document.addEventListener("keydown", e => {
   if (!R.meta || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) && document.activeElement.type !== "checkbox") return;
   if (e.code === "Space") { e.preventDefault(); $("play").click(); }
+  else if (e.key === "v" || e.key === "V") { e.preventDefault(); setVonly(!VONLY); }
   else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
     e.preventDefault();
     const fwd = e.key === "ArrowRight";
@@ -458,18 +480,19 @@ function tick(now) {
     drawTimeline();
     // 動画とマーカー: 前のコマを描き終えてから次を頼む。較正中は 1 秒ごとに状態を見直す
     if (!R.frBusy && (Math.abs(R.frT - R.t) > 1e-4 || (R.ov && (R.ov.status || (R.ov.cut && R.ov.cut.done < R.ov.cut.total)) && now - R.frAt > 1000))) { R.frAt = now; loadFrame(R.t); }
-    // ①③④: テストフレームが変わったら (再生中は 0.25 秒に 1 回まで)
+    // ①③④: テストフレームが変わったら (再生中は 0.25 秒に 1 回まで)。動画のみのときは読まない
     const c = capAt(R.t);
     const key = c ? `${c.cap}:${Math.floor((R.t - c.t0) / (m.frame_s || 1e-3))}` : `out:${m.caps.filter(q => q.t0 <= R.t).length}`;
-    if (key !== R.panKey && !R.panBusy && (!R.playing || now - R.panAt > 250)) { R.panKey = key; R.panAt = now; loadPanel(R.t); }
+    if (!VONLY && key !== R.panKey && !R.panBusy && (!R.playing || now - R.panAt > 250)) { R.panKey = key; R.panAt = now; loadPanel(R.t); }
   }
   R.last = now;
   requestAnimationFrame(tick);
 }
 $("langJP").onclick = () => setLang("jp");
 $("langEN").onclick = () => setLang("en");
+$("vonly").onclick = () => setVonly(!VONLY);
 (async () => {
-  applyLang();
+  applyLang(); setVonly(VONLY);
   await listSessions();
   const m = await (await fetch("/api/replay/meta")).json();
   if (m) setMeta(m);

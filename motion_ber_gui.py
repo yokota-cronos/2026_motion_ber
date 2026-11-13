@@ -1262,8 +1262,12 @@ def main() -> int:
                     help="Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ入れ替える (画面でも変えられる)")
     ap.add_argument("--replay", nargs="?", const="latest", metavar="FOLDER",
                     help="記録の再生用の画面で開く (装置には触らない)。FOLDER を省くといちばん新しい記録")
+    ap.add_argument("--video-only", action="store_true",
+                    help="--replay の画面を動画のみ (①③④ を隠す) で開く。画面の「動画のみ」/ キー V でも切り替えられる")
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args()
+    if a.video_only and not a.replay:
+        a.replay = "latest"
     if a.replay:
         return main_viewer(a)
 
@@ -1349,7 +1353,7 @@ def main_viewer(a) -> int:
     except OSError as e:
         print(f"ポート {port} を開けません (再生用の画面がもう開いていませんか): {e}", flush=True)
         return 1
-    url = f"http://127.0.0.1:{port}/"
+    url = f"http://127.0.0.1:{port}/" + ("?mode=video" if a.video_only else "")
     print(f"記録の再生: {Path(folder).name}\n  {url}   (Ctrl-C で終了)", flush=True)
     if not a.no_browser:
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()
