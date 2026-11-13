@@ -26,6 +26,7 @@ time.perf_counter() で打った時刻で突き合わせる。
 from __future__ import annotations
 
 import argparse
+import collections
 import io
 import json
 import os
@@ -65,17 +66,35 @@ VIEWER = dict(on=False, calib=None, status="")    # --replay で開く再生用�
 _RAW_CACHE: dict = {}                     # .ad3 のパス -> 復調の材料 (直近 2 本)
 CAMERA = camera.Camera()
 CAPTURE: dict = {}            # 直近の収録: t0 [perf], n, fs, rx_fs, res。ワーカースレッドだけが書く
-OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=phase_control.HORIZONS[0],
+OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=phase_control.HORIZON_AUTO,
             swap_lr=False)       # swap_lr: Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ R_* ↔ L_* にする
 PHASE_MODEL = None
 PHASE_MODEL_NAME = ""
 LAST: dict = {}               # 画面に出す直近の収録窓のモーション
 REF = dict(base=None, ref=None, last=None)   # 位相の自動調整の基準: 初期位相・そのときのモデルの位相・最後に送った位相
+# 先読みを収録窓に合わせるための実測: 位相を送ったときの perf 時刻 (pending) と、
+# 「送った時刻 → 次の収録窓の中央」の直近の実測 [s] (obs)
+LEAD = dict(pending=None, obs=collections.deque(maxlen=phase_control.LEAD_KEEP))
 
 
 def reset_phase_ref() -> None:
     """次の収録で、そのときの画面の位相を初期位相として基準を取り直す。"""
     REF.update(base=None, ref=None, last=None)
+
+
+def expected_lead() -> float:
+    """いま位相を決めたら、次の収録窓の中央まで何秒か (直近の実測の中央値。まだ無ければ初期値)。"""
+    obs = list(LEAD["obs"])
+    return float(np.median(obs)) if obs else phase_control.LEAD_DEFAULT
+
+
+def forecast_horizon(now: float, t_motion: float | None) -> float:
+    """モデルに渡す先読み [s]。自動なら「最後のモーションのフレーム → 次の収録窓の中央」の見込み。"""
+    if OPTS["horizon"] != phase_control.HORIZON_AUTO:
+        return float(OPTS["horizon"])
+    lag = 0.0 if t_motion is None else max(0.0, now - t_motion)     # 最後のフレームはもう古い (Motive の配信・受信の遅れ)
+    g = phase_control.HORIZON_GRID
+    return round(min(max(lag + expected_lead(), g[0]), g[-1]), 3)
 
 
 # --------------------------------------------------------------------------- 差し替え
@@ -123,6 +142,8 @@ class MotionSessionLog(bg.SessionLog):
     def __init__(self, cond: dict):
         super().__init__(cond)
         reset_phase_ref()
+        LEAD["pending"] = None              # 前の記録の実測は、窓の長さや生データの保存の有無が違うかもしれないので捨てる
+        LEAD["obs"].clear()
         self.perf0, self.wall0 = time.perf_counter(), time.time()
         self.names = MOTION.names
         self.n_cap = 0
@@ -190,6 +211,11 @@ class MotionSessionLog(bg.SessionLog):
             return
         self.n_cap += 1
         t0, t1 = c["t0"], c["t0"] + c["n"] / c["fs"]
+        if LEAD["pending"] is not None:                       # 前の回に送った位相が効いたのはこの窓
+            lead = (t0 + t1) / 2 - LEAD["pending"]
+            if 0.0 < lead < 1.0:                              # 止めていた・転送が詰まったなどの外れは入れない
+                LEAD["obs"].append(lead)
+            LEAD["pending"] = None
         win = MOTION.window(t0, t1)
         n = len(self.names)
         if win:
@@ -237,7 +263,9 @@ class MotionSessionLog(bg.SessionLog):
         history = (np.array([f.t - self.perf0 for f in hist]),
                    np.stack([f.xyz for f in hist]) if hist else np.empty((0, len(self.names), 3)))
         names = tuple(phase_control.swap_lr(n) for n in self.names) if OPTS["swap_lr"] else self.names
-        m = dict(names=names, xyz=mean, valid=valid, t=t_mid, history=history, horizon=OPTS["horizon"],
+        # 先読み = 最後のモーションのフレーム → この位相が効く次の収録窓の中央 (自動のとき)
+        h = forecast_horizon(now, hist[-1].t if hist else None)
+        m = dict(names=names, xyz=mean, valid=valid, t=t_mid, history=history, horizon=h,
                  phase_deg=live["phase_deg"], level_dbm=live["level_dbm"], div=live["div"])
         try:
             r = PHASE_MODEL.predict_phase(m)
@@ -263,17 +291,20 @@ class MotionSessionLog(bg.SessionLog):
                 bg.COMMANDS.append(dict(phase_deg=v))
             REF["last"] = v
             LAST["auto_phase"] = v
-        row = dict(phase_model=p, base=REF["base"], delta=round(p - REF["ref"], 3), swap_lr=int(OPTS["swap_lr"]))
-        LAST["pred"] = dict(info or {}, **row, horizon=OPTS["horizon"], phase=v)
-        self._pred_row(now - self.perf0, dict(row, **{k: x for k, x in (info or {}).items() if k != "phase"}), v, sent)
+            LEAD["pending"] = now                            # 次の収録窓の中央までを測る
+        row = dict(phase_model=p, base=REF["base"], delta=round(p - REF["ref"], 3), swap_lr=int(OPTS["swap_lr"]),
+                   horizon_mode="auto" if OPTS["horizon"] == phase_control.HORIZON_AUTO else "fixed",
+                   t_motion=round(hist[-1].t - self.perf0, 6) if hist else None)
+        LAST["pred"] = dict(info or {}, **row, horizon=h, phase=v)
+        self._pred_row(now - self.perf0, h, dict(row, **{k: x for k, x in (info or {}).items() if k != "phase"}), v, sent)
 
-    def _pred_row(self, t, info: dict, v, sent: bool) -> None:
-        """phase_pred.csv: 1 回ごとの位相の決め方 (初期位相・補正量) と、モデルが出した値 (推定したインピーダンスなど)。"""
+    def _pred_row(self, t, h: float, info: dict, v, sent: bool) -> None:
+        """phase_pred.csv: 1 回ごとの位相の決め方 (先読み・初期位相・補正量) と、モデルが出した値 (推定したインピーダンスなど)。"""
         if self.pcsv is None:
             self.pcols = list(info)
             self.pcsv = open(self.dir / "phase_pred.csv", "w", encoding="utf-8", newline="", buffering=1)
             self.pcsv.write(",".join(["cap", "t", "horizon", "phase", "sent"] + self.pcols) + "\n")
-        cells = [str(self.n_cap), f"{t:.6f}", f"{OPTS['horizon']:g}", _f(v, "{:g}"), "1" if sent else "0"]
+        cells = [str(self.n_cap), f"{t:.6f}", f"{h:g}", _f(v, "{:g}"), "1" if sent else "0"]
         cells += [_f(info.get(k), "{}") for k in self.pcols]
         with self.mlock:
             if not self.pcsv.closed:
@@ -338,7 +369,7 @@ PANEL = """
     <div class="grp">
       <label class="chk" title="OFF: OptiTrack を受けていないときは BER の「開始」を断る"><input id="mNoReq" type="checkbox">OptiTrack なしでも開始できる</label>
       <label class="chk" id="mAutoL" title="入れたときの位相を初期位相にして、--phase-model のモデルが推定した変化ぶんだけ収録ごとにずらす。手で位相を変えると、それが新しい初期位相になる"><input id="mAuto" type="checkbox">位相の自動調整</label>
-      <label title="モデルに渡す先読み。次の収録のときの姿勢を当てるために、この時間だけ先のインピーダンスで位相を決める">先読み<select id="mHor"><option value="0.1">100 ms 先</option><option value="0.2">200 ms 先</option></select></label>
+      <label title="モデルに渡す先読み。この位相が効く次の収録窓のときの姿勢を当てるために、この時間だけ先のインピーダンスで位相を決める。自動は、位相を送ってから次の収録窓の中央までを毎回測って合わせる">先読み<select id="mHor"><option value="auto">自動（収録窓に合わせる）</option><option value="0.1">100 ms 先</option><option value="0.2">200 ms 先</option></select></label>
       <label class="chk" title="Motive のラベルが左右逆 (R_* が本人の左腕) のとき入れる。位相のモデルに渡す名前だけ入れ替える。記録の CSV はラベルのまま (後で fix_lr.py で直す)"><input id="mSwap" type="checkbox">マーカーの左右が逆</label>
     </div>
     <div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;font-size:13px">
@@ -418,7 +449,7 @@ PANEL_JS = """
       val("mLast").textContent = L && L.cap ? `直近の収録 #${L.cap}: モーション ${L.motion_frames} フレーム、全点見えていた ${(L.valid_frac * 100).toFixed(0)}%` +
         (L.auto_phase != null ? `、自動位相 ${L.auto_phase}°` : "") : "";
       const P = L && L.pred, z = (r, x) => `${r.toFixed(1)}${x < 0 ? "−" : "+"}j${Math.abs(x).toFixed(1)}`;
-      if (P && P.L_Z_R != null) val("mLast").textContent += `　推定 Z（${P.horizon * 1000} ms 先）: 左 ${z(P.L_Z_R, P.L_Z_X)} Ω・右 ${z(P.R_Z_R, P.R_Z_X)} Ω`;
+      if (P && P.L_Z_R != null) val("mLast").textContent += `　推定 Z（${Math.round(P.horizon * 1000)} ms 先${P.horizon_mode === "auto" ? "・自動" : ""}）: 左 ${z(P.L_Z_R, P.L_Z_X)} Ω・右 ${z(P.R_Z_R, P.R_Z_X)} Ω`;
       if (P && P.base != null) val("mLast").textContent += `　初期 ${P.base}° ${P.delta < 0 ? "−" : "+"} 補正 ${Math.abs(P.delta).toFixed(2)}° → ` +
         (P.phase != null ? `指定 ${P.phase}°` : "90〜270° の外なので変えない");
       const c = s.camera;
@@ -555,7 +586,7 @@ PANEL_JS = """
   val("mGroup").onchange = () => mpost("/api/motion/options", { group: val("mGroup").value });
   val("mNoReq").onchange = () => mpost("/api/motion/options", { require_motion: !val("mNoReq").checked });
   val("mAuto").onchange = () => mpost("/api/motion/options", { auto_phase: val("mAuto").checked });
-  val("mHor").onchange = () => mpost("/api/motion/options", { horizon: +val("mHor").value });
+  val("mHor").onchange = () => mpost("/api/motion/options", { horizon: val("mHor").value === "auto" ? "auto" : +val("mHor").value });
   val("mSwap").onchange = () => mpost("/api/motion/options", { swap_lr: val("mSwap").checked });
   val("cOpen").onclick = () => mpost("/api/camera/open", { index: +val("cIndex").value });
   val("cClose").onclick = () => mpost("/api/camera/close");
@@ -1208,9 +1239,7 @@ class Handler(bg.Handler):
                 reset_phase_ref()
                 MOTION.error = ""
             if "horizon" in q:
-                h = float(q["horizon"])
-                if h not in phase_control.HORIZONS:
-                    raise ValueError(f"先読みは {phase_control.HORIZONS} s のどれか")
+                h = phase_control.parse_horizon(q["horizon"])     # "auto" / 0.1 / 0.2
                 if h != OPTS["horizon"]:
                     OPTS["horizon"] = h                            # 次の収録の予測から効く
                     reset_phase_ref()                              # モデルが変わるので、いまの位相を初期位相に取り直す
@@ -1256,8 +1285,8 @@ def main() -> int:
     ap.add_argument("--camera", type=int, metavar="N", help="起動時にカメラ N を開く (0 = 内蔵のことが多い)")
     ap.add_argument("--phase-model", help="predict_phase(motion) を持つ .py (phase_control.py 参照)。"
                     "モーションからインピーダンスを先読みして決めるなら imp_phase_model.py")
-    ap.add_argument("--horizon", type=float, choices=phase_control.HORIZONS, default=phase_control.HORIZONS[0],
-                    help="位相のモデルに渡す先読み [s] (既定 0.1。画面でも変えられる)")
+    ap.add_argument("--horizon", type=phase_control.parse_horizon, default=phase_control.HORIZON_AUTO,
+                    help="位相のモデルに渡す先読み: auto (既定。次の収録窓の中央に合わせる) か 0.1 / 0.2 [s]。画面でも変えられる")
     ap.add_argument("--swap-lr", action="store_true",
                     help="Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ入れ替える (画面でも変えられる)")
     ap.add_argument("--replay", nargs="?", const="latest", metavar="FOLDER",

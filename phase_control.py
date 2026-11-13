@@ -24,8 +24,10 @@ motion (dict):
     valid     収録窓のうち全マーカーが見えていたフレームの割合 (0..1)
     t         収録窓の中央 [s、記録開始から]
     history   (t (k,), xyz (k, 7, 3)): 呼んだ時点までの直近 HISTORY_SEC 秒の全フレーム (古い順、t は記録開始からの秒)。
-              先読みするモデル用。次の収録はこの最後のフレームの直後に始まる
-    horizon   画面で選んだ先読み [s] (0.1 / 0.2)。使わないモデルは無視してよい
+              先読みするモデル用。次の収録は、このあと位相を送る待ち (set_phase の 50 ms) などを挟んで始まる
+    horizon   先読み [s] = 「history の最後のフレーム → 次の収録窓の中央」の時間。
+              画面の「先読み」が「自動 (収録窓に合わせる)」なら、直近の収録で実測した時間から決める (毎回少し変わる)。
+              100 / 200 ms を選んでいればその値。使わないモデルは無視してよい
     phase_deg いまの位相の指定値 [°]
     level_dbm いまのレベル [dBm]
     div       データレート FC/div
@@ -47,7 +49,25 @@ import importlib.util
 from pathlib import Path
 
 PHASE_MIN, PHASE_MAX = 90.0, 270.0
-HORIZONS = (0.1, 0.2)                     # 画面で選べる先読み [s]
+HORIZONS = (0.1, 0.2)                     # 画面で選べる固定の先読み [s]
+HORIZON_AUTO = "auto"                     # 先読みを次の収録窓の中央に合わせる (既定)
+# 自動のときにモデルが受け付ける先読みの刻み [s]。imp_phase_model の Ridge はこの全部を学習しておく
+HORIZON_GRID = tuple(round(0.02 + 0.01 * i, 2) for i in range(29))      # 0.02〜0.30 s
+# 自動のとき: 「位相を決めた (predict_phase を呼んだ) 時刻 → 次の収録窓の中央」の初期値 [s]。
+# 記録の最初だけ使い、位相を送った収録が 1 回あれば実測 (直近 LEAD_KEEP 回の中央値) に替わる。
+# 2026-11-12 19:31 の記録では、送ってから収録開始まで中央値 103 ms (p10 94・p90 133) + 窓 50 ms の半分
+LEAD_DEFAULT = 0.13
+LEAD_KEEP = 10
+
+
+def parse_horizon(v):
+    """画面・コマンドラインの先読み ("auto" / 0.1 / 0.2) → HORIZON_AUTO か float。"""
+    if str(v).strip().lower() == HORIZON_AUTO:
+        return HORIZON_AUTO
+    h = float(v)
+    if h not in HORIZONS:
+        raise ValueError(f"先読みは {HORIZON_AUTO} か {HORIZONS} s のどれか")
+    return h
 HISTORY_SEC = 0.3                         # motion["history"] に渡す長さ [s]
 PHASE_OFFSET_DEG = 175.53 - 180.04        # 実測 → 指定値 (README「実測で決めた値」)
 

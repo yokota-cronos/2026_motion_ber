@@ -88,12 +88,13 @@ def fit(sessions, idx_by_sess, trees: int, leaf: int):
                                          n_jobs=-1).fit(X, y)
         print(f"  ExtraTrees {side}: {len(X)} フレーム、{time.perf_counter() - t0:.1f} s")
     ridge = {}
-    for h in M.HORIZONS:
+    for h in M.HORIZON_GRID:                                           # 収録窓に合わせるため 0.02〜0.30 s の 0.01 刻み
         parts = [ar_samples(s, h, i) for s, i in zip(sessions, idx_by_sess)]
         X = np.vstack([p[0] for p in parts])
         Y = np.vstack([p[1] for p in parts])
         ridge[h] = Ridge(alpha=1.0).fit(X, Y)                           # レポートと同じ alpha
-        print(f"  Ridge AR {h:.1f} s 先: {len(X)} サンプル")
+    print(f"  Ridge AR {M.HORIZON_GRID[0]:.2f}〜{M.HORIZON_GRID[-1]:.2f} s 先 ({len(ridge)} 本): "
+          f"{len(X)} サンプル ({M.HORIZON_GRID[-1]:.2f} s 先のとき)")
     return et, ridge
 
 

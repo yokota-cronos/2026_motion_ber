@@ -4,7 +4,7 @@ OptiTrack（Motive / NatNet）で身体の 7 マーカーを撮りながら、AD
 画面にはマーカーの 3D 表示と Web カメラの映像も出し、BER の記録中はカメラも録画する。
 BER の 1 収録ごと・テストフレーム 1 枚ごとに、そのときの姿勢を対応付けて残す。
 
-モーションからコイルのインピーダンスを 100 / 200 ms 先まで推定して、リーダの W2−W1 位相差を収録ごとに
+モーションからコイルのインピーダンスを、送った位相が効く次の収録窓の時刻（約 140 ms 先）まで先読みして、リーダの W2−W1 位相差を収録ごとに
 自動で合わせられる（`--phase-model imp_phase_model.py`。「位相の自動調整」の節）。
 
 ## 何をどこから使っているか
@@ -79,7 +79,7 @@ uv run python tests/test_motion_ber.py         # 装置無しで確かめられ�
 | `cap_*.ad3` | 収録 1 回の生データ（「生データも記録」のときだけ。1 本約 20 MB） | 「記録の再生」で波形を描くのに使う |
 | `frames.csv` | テストフレーム 1 枚（600 ビット） | `cap`、`t`、`errors`（−1 = 取得失敗）、`OptiFrame`（いちばん近い Motive フレーム） |
 | `camera.mp4` / `camera_frames.csv` | カメラの 1 コマ | `video_frame`（動画の何コマ目か）、`t`（そのコマを受けた時刻）。カメラを繋いでいて「カメラも録画」のときだけ |
-| `phase_pred.csv` | 位相の自動調整の 1 回（入れているときだけ） | `cap`、`t`、`horizon`、`phase`（指定値）、`sent`、`phase_model`、`base`（初期位相）、`delta`（補正量）、`L_Z_R`〜`R_Z_X`（`imp_phase_model.py` のとき） |
+| `phase_pred.csv` | 位相の自動調整の 1 回（入れているときだけ） | `cap`、`t`、`horizon`（実際に使った先読み）、`phase`（指定値）、`sent`、`phase_model`、`base`（初期位相）、`delta`（補正量）、`horizon_mode`、`t_motion`、`L_Z_R`〜`R_Z_X`（`imp_phase_model.py` のとき） |
 | `motion_conditions.json` | — | 部位、マーカー名、カメラの設定、時計の対応（`perf0` ↔ `wall0`） |
 
 `camera.mp4` の再生速度は名目の fps なので、**動画の時刻ではなく `camera_frames.csv` の `t` を使うこと**（カメラの実際のコマ間隔は明るさなどで変わる）。
@@ -204,7 +204,7 @@ uv run fix_lr.py <記録フォルダ名> --undo   # 元に戻す（どちらを�
 ```bash
 uv run train_imp_model.py                                   # 最初に 1 回（数秒）。models/imp_1111.joblib（86 MB、git には入れない）
 uv run motion_ber_gui.py --phase-model imp_phase_model.py   # 画面の「位相の自動調整」で入れる
-uv run motion_ber_gui.py --phase-model imp_phase_model.py --horizon 0.2   # 先読みを 200 ms で始める（画面でも変えられる）
+uv run motion_ber_gui.py --phase-model imp_phase_model.py --horizon 0.2   # 先読みを固定の 200 ms で始める（既定は auto。画面でも変えられる）
 ```
 
 渡したファイルの `predict_phase(motion) -> float | None` を**収録 1 回ごとに 1 回**呼び、返した位相を
@@ -235,10 +235,24 @@ GUI で入れたのと同じ経路で次の収録の前に反映する（`Bridge
 R_* ↔ L_* にする（モデルは本人の左右で学習している）。記録の CSV はラベルのままなので、後で `fix_lr.py` で直す。
 記録の途中で Motive が左右を入れ替えた場合（`fix_lr.py --flips` で見つかるもの）には追従しない。
 
-先読み h は画面の「先読み」で **100 ms / 200 ms** を選ぶ。次の収録はモデルを呼んだ直後に始まるので、h は「次の収録のときの姿勢」を当てるための時間。
+**先読み h は、送った位相が効く「次の収録窓の中央」に合わせる**（画面の「先読み」の既定「自動（収録窓に合わせる）」、`--horizon auto`）。
+位相を決めてから次の収録が始まるまでには、位相を送る待ち（`set_phase` の 50 ms）などがあって約 0.1 s かかる。
+これに窓の長さの半分と、最後に届いたモーションのフレームの古さを足すと、h は約 0.14 s になる（2026-11-12 19:31 の記録）。
+以前の固定 0.1 s では窓より約 40 ms 手前の姿勢を当てていた。そのため、下ろす途中の腕などで位相の補正が遅れていた。
+
+- 位相を送るたびに「送った時刻 → 次の収録窓の中央」を測り、直近 10 回の中央値を次の見込みにする（記録ごとに測り直す。
+  最初の 1 回は 0.13 s。`phase_control.LEAD_DEFAULT`）。h = （いま − 最後のモーションのフレームの時刻）+ その見込み。
+- `imp_phase_model.py` の Ridge は 0.02〜0.30 s を 0.01 s 刻みで学習してあり、h にいちばん近いものを使う
+  （`phase_control.HORIZON_GRID`。0.1 / 0.2 s だけの古いモデルは読み込み時に断るので、`uv run train_imp_model.py` で作り直す）。
+- 固定の 100 ms / 200 ms も選べる（比較用）。
+- 19:31 の記録で、位相が効いた窓の平均姿勢を正解にして比べると、固定 0.1 s → 自動で、マーカー位置の RMSE が 26.3 → 20.5 mm、
+  そこから出した位相の RMSE が 3.0 → 2.4°（窓の時刻を後から知っている理想は 19.4 mm・2.3°）。
+
 画面の「直近の収録」の行に推定した Z と出した位相が出て、記録フォルダの **`phase_pred.csv`** に 1 回ごとに残る
-（`cap`、`t`、`horizon`、`phase` = 指定した値、`sent` = 実際に送ったか、`phase_model` = モデルが出した絶対の位相、
-`base` = 初期位相、`delta` = 補正量、`phase_actual`、`L_Z_R`〜`R_Z_X` [Ω]）。
+（`cap`、`t`、`horizon` = 実際に使った先読み [s]、`phase` = 指定した値、`sent` = 実際に送ったか、`phase_model` = モデルが出した絶対の位相、
+`base` = 初期位相、`delta` = 補正量、`swap_lr`、`horizon_mode` = auto / fixed、`t_motion` = 先読みの起点（最後のモーションのフレームの時刻）、
+`phase_actual`、`horizon_model` = 使った Ridge の先読み、`L_Z_R`〜`R_Z_X` [Ω]）。
+**列は 2026-11-13 に増えた**（`horizon_mode`・`t_motion`・`horizon_model`）。それより前の記録の `horizon` は固定値。
 直近 0.14 s の間にマーカーが 1 点でも隠れていたら位相は変えない。
 
 学習（`train_imp_model.py`）は 1111 のデータ（`1111_1547_kajihara_@13.56MHz.csv`、1 セッション 237 秒）を、

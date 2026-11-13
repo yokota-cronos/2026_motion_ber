@@ -13,7 +13,9 @@
 GUI はこの位相の**変化ぶんだけ**を、手で合わせた初期位相に足す (phase_control.py)。なので下の式の
 定数項 (PHASE_OFFSET_DEG、180°) は効かず、効くのは左右の arg Z の差が姿勢でどれだけ動くかだけ。
 
-h は画面で 0.1 s / 0.2 s を選ぶ (motion["horizon"])。レポートの L_Z_X の RMSE は、現在推定 / 0.1 s 先 /
+h は motion["horizon"]。既定 (画面の「先読み」が自動) では、GUI が実測した「最後のモーション → 次の収録窓の中央」
+(2026-11-12 の記録で約 0.14 s)。Ridge は 0.02〜0.30 s を 0.01 s 刻みで学習しておき、いちばん近いものを使う。
+固定の 0.1 s / 0.2 s も選べる。レポートの L_Z_X の RMSE は、現在推定 / 0.1 s 先 /
 0.2 s 先で 1013ver1 が 1.49 / 1.74 / 2.36 Ω、1111 が 0.95 / 1.23 / 2.03 Ω。
 
 **レポートとの違い:** レポートは「過去 8 点」「h 秒先」をフレーム数で数えている (VNA の掃引落ちで 1111 は 14.8 %、
@@ -36,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-from phase_control import HORIZONS, PHASE_OFFSET_DEG  # HORIZONS = 先読み [s]。学習するのも画面で選べるのもこれ
+from phase_control import HORIZON_GRID, HORIZONS, PHASE_OFFSET_DEG  # 学習する先読み = HORIZON_GRID (0.02〜0.30 s、0.01 刻み)
 
 HERE = Path(__file__).resolve().parent
 DATASET = "1111"        # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
@@ -125,18 +127,36 @@ def setup() -> None:
     b = joblib.load(MODEL_PATH)
     for m in b["et"].values():
         m.n_jobs = 1                # 1 点ずつしか推定しないので、スレッドを立てる方が遅い
+    missing = [h for h in HORIZON_GRID if h not in b["ridge"]]
+    if missing:
+        raise RuntimeError(f"{MODEL_PATH} は先読み {sorted(b['ridge'])} s しか学習していません "
+                           f"(収録窓に合わせるには 0.02〜0.30 s の 0.01 刻みが要る)。"
+                           f"`uv run train_imp_model.py` で作り直してください")
     BUNDLE = b
+
+
+def ridge_horizon(h: float) -> float:
+    """先読み h [s] に使う Ridge のキー (学習してある先読みのうち、いちばん近いもの)。
+
+    0.01 s 刻みより細かくは合わせない (その間の姿勢の差は 0.01 s × 腕の速さ 1 m/s ≈ 5 mm 以下)。
+    刻みの外 (0.3 s より先など) は端の値にする。0.1 / 0.2 s しか無い古いモデルでは誤差が大きいので、
+    setup() の時点で学習し直しを促す。
+    """
+    if BUNDLE is None:
+        setup()
+    keys = np.array(sorted(BUNDLE["ridge"]))
+    return float(keys[np.argmin(np.abs(keys - h))])
 
 
 def forecast_impedance(t: np.ndarray, xyz: np.ndarray, names, h: float):
     """直近のモーション → h 秒先の [L_Z_R, L_Z_X, R_Z_R, R_Z_X] [Ω]。履歴が足りなければ None。
 
     t: (k,) [s]、xyz: (k, マーカー数, 3) [m]、names: xyz の並び (Motive の配信順)。
+    h は学習してある先読みのうちいちばん近いものに丸める (ridge_horizon)。
     """
     if BUNDLE is None:
         setup()
-    if h not in BUNDLE["ridge"]:
-        raise ValueError(f"先読み {h} s のモデルがありません (あるのは {sorted(BUNDLE['ridge'])})")
+    h = ridge_horizon(h)
     missing = [m for m in MARKERS if m not in names]
     if missing:
         raise ValueError(f"マーカー {missing} がありません (計測部位を上半身にする)")
@@ -165,5 +185,5 @@ def predict_phase(motion):
     if z is None:
         return None                               # マーカーが隠れていた → 位相は変えない
     actual = phase_for_impedance(z)
-    return dict(phase=actual + PHASE_OFFSET_DEG, phase_actual=round(actual, 2),
+    return dict(phase=actual + PHASE_OFFSET_DEG, phase_actual=round(actual, 2), horizon_model=ridge_horizon(h),
                 **{k: round(float(v), 3) for k, v in zip(TARGETS, z)})

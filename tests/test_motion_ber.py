@@ -181,12 +181,70 @@ def test_auto_phase_history_and_info(tmp_path=None):
         assert [(r["phase"], r["sent"], r["base"], r["delta"]) for r in rows] == \
             [("180", "0", "180.0", "0.0"), ("183", "1", "180.0", "3.0")]
         assert rows[1]["horizon"] == "0.2" and rows[1]["phase_model"] == "203.0" and rows[1]["L_Z_R"] == "20.0"
+        assert rows[1]["horizon_mode"] == "fixed"
     finally:
         mb.PHASE_MODEL = None
-        mb.OPTS.update(auto_phase=False, horizon=0.1, swap_lr=False)
+        mb.OPTS.update(auto_phase=False, horizon=mb.phase_control.HORIZON_AUTO, swap_lr=False)
         mb.LAST.pop("pred", None)
         mb.bg.STATE.live["phase_deg"] = 180.0
         mb.bg.COMMANDS.clear()
+
+
+def test_auto_horizon_follows_capture_window(tmp_path=None):
+    """先読み「自動」: 位相を送ってから次の収録窓の中央までを測り、次からその時間 (+ モーションの古さ) を先読みにする。"""
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    PC = mb.phase_control
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    seen = []
+    vals = iter([200.0, 203.0, 206.0, 209.0])
+
+    def predict(m):
+        seen.append(m["horizon"])
+        return dict(phase=next(vals))
+
+    def capture(t0):
+        mb.CAPTURE.update(t0=t0, n=5_000_000, fs=100e6, rx_fs=12.5e6,           # 窓 50 ms
+                          res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int), frame_errors=np.zeros(0, int)))
+        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
+
+    mb.PHASE_MODEL = NS(predict_phase=predict)
+    mb.OPTS.update(auto_phase=True, horizon=PC.HORIZON_AUTO, swap_lr=False)
+    mb.bg.COMMANDS.clear()
+    try:
+        log = _session(tmp)
+        assert len(mb.LEAD["obs"]) == 0 and mb.LEAD["pending"] is None          # 記録ごとに測り直す
+        t = time.perf_counter()
+        for k in range(60):                                                     # 最後のフレームは 20 ms 前
+            mb.MOTION._ingest(t - 0.5 + k / 120 - 0.02 + 0.5 / 120, k, 0.0, None, np.zeros((7, 3)) + k)
+        capture(t - 0.06)
+        # 1 回目: 実測が無いので初期値。基準を取るだけで送らない → まだ測らない
+        assert abs(seen[0] - (0.02 + PC.LEAD_DEFAULT)) < 0.01, seen
+        assert mb.LEAD["pending"] is None
+        capture(t - 0.06)                                                       # 2 回目: 203 → 送る
+        assert mb.LEAD["pending"] is not None
+        sent_at = mb.LEAD["pending"]
+        capture(sent_at + 0.15)                                                 # 送ってから 150 ms 後に窓 (中央 175 ms)
+        assert len(mb.LEAD["obs"]) == 1 and abs(mb.LEAD["obs"][0] - 0.175) < 1e-6
+        # 3 回目の予測は 実測 175 ms + モーションの古さ (>= 20 ms) を先読みにする
+        assert seen[2] >= 0.175 + 0.02 - 1e-6 and seen[2] <= PC.HORIZON_GRID[-1], seen
+        log.close()
+        rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
+        assert [r["horizon_mode"] for r in rows] == ["auto"] * 3 and float(rows[2]["horizon"]) == seen[2]
+        assert rows[0]["t_motion"] != ""
+    finally:
+        mb.PHASE_MODEL = None
+        mb.OPTS.update(auto_phase=False, horizon=PC.HORIZON_AUTO, swap_lr=False)
+        mb.LAST.pop("pred", None)
+        mb.bg.STATE.live["phase_deg"] = 180.0
+        mb.bg.COMMANDS.clear()
+    # 画面・コマンドラインの値
+    assert PC.parse_horizon("auto") == PC.HORIZON_AUTO and PC.parse_horizon("0.2") == 0.2
+    try:
+        PC.parse_horizon(0.15)
+        raise AssertionError("0.15 は固定の先読みとしては受け付けない")
+    except ValueError:
+        pass
 
 
 def test_imp_phase_model():
@@ -216,7 +274,10 @@ def test_imp_phase_model():
                                         "leftbody_Z_R_13.56", "leftbody_Z_X_13.56")]
     assert all(abs(out[n] - v) < 10 for n, v in zip(M.TARGETS, real)), (out, real)
     assert 90 <= out["phase"] <= 270
-    xyz[sel.nonzero()[0][-8:], 2] = np.nan                                    # 直近 0.08 s が隠れた → 変えない
+    # 収録窓に合わせた半端な先読みは、学習してある 0.01 s 刻みのいちばん近いもので推定する
+    out2 = M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.143))
+    assert out2["horizon_model"] == 0.14 and M.ridge_horizon(0.5) == 0.3
+    xyz[sel.nonzero()[0][-8:], 2] = np.nan                                   # 直近 0.08 s が隠れた → 変えない
     assert M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1)) is None
 
 
