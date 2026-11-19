@@ -104,49 +104,51 @@ def test_session_join(tmp_path=None):
     assert json.loads((d / "motion_conditions.json").read_text(encoding="utf-8"))["marker_names"][0] == "chest"
 
 
+def _cap_dict(t0, phase_src="manual"):
+    return dict(t0=t0, n=1_000_000, fs=100e6, rx_fs=12.5e6, phase_src=phase_src,
+                res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int), frame_errors=np.zeros(0, int)))
+
+
 def test_auto_phase_hook(tmp_path=None):
-    """送る位相 = 初期位相 + (モデルの位相 − 基準)。手で位相を変えたら、それが新しい初期位相。"""
+    """収録の直前に決める位相 = 初期位相 + (モデルの位相 − 基準)。基準は最初の REF_WARMUP 回の中央値で、その間は
+    位相を変えない (外れ値で全体がずれないように)。手で位相を変えたら、それが新しい初期位相で、基準も取り直す。"""
     tmp = Path(tmp_path or tempfile.mkdtemp())
     mb.MOTION.close()
     mb.MOTION.buf.clear()
-    vals = iter([200.0, 202.5, None, 199.0, 201.0])
+    vals = iter([200.0, 230.0, 202.0, 205.0, None, 199.0, 199.0, 201.0, 203.0])
+    warm0, mb.phase_control.REF_WARMUP = mb.phase_control.REF_WARMUP, 3
     mb.PHASE_MODEL = NS(predict_phase=lambda m: next(vals))
     mb.OPTS["auto_phase"] = True
     mb.bg.COMMANDS.clear()
     mb.bg.STATE.live["phase_deg"] = 175.53                    # 手で合わせた初期位相
     try:
         log = _session(tmp)
-
-        def cap(phase):
-            t = time.perf_counter()
-            mb.MOTION._ingest(t + 0.005, 1, 0.0, None, np.zeros((7, 3)) + 1)
-            mb.CAPTURE.update(t0=t, n=1_000_000, fs=100e6, rx_fs=12.5e6,
-                              res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int),
-                                       frame_errors=np.zeros(0, int)))
-            log.row(dict(t=0, level=0.0, phase=phase, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
-
-        cap(175.53)                                    # 200 → 基準を取るだけ。位相は変えない
-        assert mb.bg.COMMANDS == [] and mb.REF["base"] == 175.53
-        cap(175.53)                                    # 202.5 → 初期位相 + 2.5
-        assert mb.bg.COMMANDS[-1] == dict(phase_deg=178.03) and mb.bg.STATE.live["phase_deg"] == 178.03
-        cap(178.03)                                    # None (隠れなど) → 変えない
-        assert len(mb.bg.COMMANDS) == 1
-        mb.bg.STATE.live["phase_deg"] = 170.0          # 手で変えた → 新しい初期位相、基準も取り直す
-        cap(170.0)                                     # 199 → 基準
-        assert len(mb.bg.COMMANDS) == 1 and mb.REF["base"] == 170.0
-        cap(170.0)                                     # 201 → 170 + 2
-        assert mb.bg.COMMANDS[-1] == dict(phase_deg=172.0)
+        got = []
+        for k in range(1, 10):
+            if k == 6:
+                mb.bg.STATE.live["phase_deg"] = 170.0          # 手で変えた → 新しい初期位相、基準も取り直す
+            v = log.phase_before_capture(k)
+            got.append(v)
+            src = "auto" if v is not None else "manual"
+            log.row(dict(t=0, level=0.0, phase=v if v is not None else mb.bg.STATE.live["phase_deg"], frames=0,
+                         expected=0, bits=0, errors=0, q=None, eye=None), cap=_cap_dict(time.perf_counter(), src))
+        # 200・230 (外れ値)・202 → 基準は中央値 202、その間は初期位相のまま。205 → +3、None → 変えない、
+        # 手で 170 に変えた → 199・199・201 で基準を取り直す (中央値 199)、203 → +4
+        assert got == [175.53, 175.53, 175.53, 178.53, None, 170.0, 170.0, 170.0, 174.0], got
+        assert mb.bg.STATE.live["phase_deg"] == 174.0 and mb.REF["base"] == 170.0 and mb.REF["ref"] == 199.0
+        assert mb.bg.COMMANDS == []                     # 収録スレッドが自分で位相を変える (COMMANDS は手の操作だけ)
         log.close()
         rows = list(csv.DictReader(open(log.dir / "ber_motion.csv", encoding="utf-8")))
-        assert [r["phase_src"] for r in rows] == ["manual", "manual", "auto", "manual", "manual"]
+        assert [r["phase_src"] for r in rows] == ["auto"] * 4 + ["manual"] + ["auto"] * 4
     finally:
+        mb.phase_control.REF_WARMUP = warm0
         mb.PHASE_MODEL, mb.OPTS["auto_phase"] = None, False
         mb.bg.STATE.live["phase_deg"] = 180.0
         mb.bg.COMMANDS.clear()
 
 
 def test_auto_phase_history_and_info(tmp_path=None):
-    """先読みするモデル用の history / horizon と、dict を返したときの phase_pred.csv。"""
+    """先読みするモデル用の history / 固定の horizon と、dict を返したときの phase_pred.csv (cap = その位相で撮った収録)。"""
     tmp = Path(tmp_path or tempfile.mkdtemp())
     mb.MOTION.close()
     mb.MOTION.buf.clear()
@@ -159,92 +161,233 @@ def test_auto_phase_history_and_info(tmp_path=None):
 
     mb.PHASE_MODEL = NS(predict_phase=predict)
     mb.OPTS.update(auto_phase=True, horizon=0.2, swap_lr=True)
+    warm0, mb.phase_control.REF_WARMUP = mb.phase_control.REF_WARMUP, 1
     mb.bg.COMMANDS.clear()
     try:
         log = _session(tmp)
         t = time.perf_counter()
         for k in range(60):                                   # 0.5 s 分 (120 fps)。HISTORY_SEC = 0.3 s の 36 コマだけ渡る
             mb.MOTION._ingest(t - 0.5 + k / 120, k, 0.0, None, np.zeros((7, 3)) + k)
-        mb.CAPTURE.update(t0=t - 0.2, n=1_000_000, fs=100e6, rx_fs=12.5e6,
-                          res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int), frame_errors=np.zeros(0, int)))
-        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
+        assert log.phase_before_capture(1) == 180.0
         ht, hx = seen["history"]
         assert seen["horizon"] == 0.2 and np.all(np.diff(ht) > 0)
         assert seen["names"] == tuple(mb.phase_control.swap_lr(n) for n in mb.MOTION.names)   # 左右逆のラベルを本人の左右に
         assert seen["names"][0] == "chest"
         assert 34 <= hx.shape[0] <= 37 and hx.shape[1:] == (7, 3) and hx[-1, 0, 0] == 59
-        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
-        assert mb.bg.COMMANDS == [dict(phase_deg=183.0)]                    # 初期 180° + (203 − 200)
+        assert seen["xyz"][0, 0] == 59 and seen["valid"] == 1.0                  # いちばん新しいフレーム
+        assert log.phase_before_capture(2) == 183.0                               # 初期 180° + (203 − 200)
         assert mb.LAST["pred"]["L_Z_X"] == -10.0 and mb.LAST["pred"]["delta"] == 3.0
         log.close()
         rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
-        assert [(r["phase"], r["sent"], r["base"], r["delta"]) for r in rows] == \
-            [("180", "0", "180.0", "0.0"), ("183", "1", "180.0", "3.0")]
+        assert [(r["cap"], r["phase"], r["sent"], r["base"], r["delta"]) for r in rows] == \
+            [("1", "180", "0", "180.0", "0.0"), ("2", "183", "1", "180.0", "3.0")]
         assert rows[1]["horizon"] == "0.2" and rows[1]["phase_model"] == "203.0" and rows[1]["L_Z_R"] == "20.0"
-        assert rows[1]["horizon_mode"] == "fixed"
+        assert float(rows[1]["t_motion"]) <= float(rows[1]["t"]) <= float(rows[1]["t_decided"])
     finally:
+        mb.phase_control.REF_WARMUP = warm0
         mb.PHASE_MODEL = None
-        mb.OPTS.update(auto_phase=False, horizon=mb.phase_control.HORIZON_AUTO, swap_lr=False)
+        mb.OPTS.update(auto_phase=False, horizon=mb.phase_control.HORIZONS[0], swap_lr=False)
         mb.LAST.pop("pred", None)
         mb.bg.STATE.live["phase_deg"] = 180.0
         mb.bg.COMMANDS.clear()
-
-
-def test_auto_horizon_follows_capture_window(tmp_path=None):
-    """先読み「自動」: 位相を送ってから次の収録窓の中央までを測り、次からその時間 (+ モーションの古さ) を先読みにする。"""
-    tmp = Path(tmp_path or tempfile.mkdtemp())
     PC = mb.phase_control
-    mb.MOTION.close()
-    mb.MOTION.buf.clear()
-    seen = []
-    vals = iter([200.0, 203.0, 206.0, 209.0])
-
-    def predict(m):
-        seen.append(m["horizon"])
-        return dict(phase=next(vals))
-
-    def capture(t0):
-        mb.CAPTURE.update(t0=t0, n=5_000_000, fs=100e6, rx_fs=12.5e6,           # 窓 50 ms
-                          res=dict(starts=np.zeros(0, np.int64), status=np.zeros(0, int), frame_errors=np.zeros(0, int)))
-        log.row(dict(t=0, level=0.0, phase=180.0, frames=0, expected=0, bits=0, errors=0, q=None, eye=None))
-
-    mb.PHASE_MODEL = NS(predict_phase=predict)
-    mb.OPTS.update(auto_phase=True, horizon=PC.HORIZON_AUTO, swap_lr=False)
-    mb.bg.COMMANDS.clear()
+    assert PC.parse_horizon("0.1") == 0.1 and all(h in PC.HORIZON_GRID for h in PC.HORIZONS)
     try:
-        log = _session(tmp)
-        assert len(mb.LEAD["obs"]) == 0 and mb.LEAD["pending"] is None          # 記録ごとに測り直す
-        t = time.perf_counter()
-        for k in range(60):                                                     # 最後のフレームは 20 ms 前
-            mb.MOTION._ingest(t - 0.5 + k / 120 - 0.02 + 0.5 / 120, k, 0.0, None, np.zeros((7, 3)) + k)
-        capture(t - 0.06)
-        # 1 回目: 実測が無いので初期値。基準を取るだけで送らない → まだ測らない
-        assert abs(seen[0] - (0.02 + PC.LEAD_DEFAULT)) < 0.01, seen
-        assert mb.LEAD["pending"] is None
-        capture(t - 0.06)                                                       # 2 回目: 203 → 送る
-        assert mb.LEAD["pending"] is not None
-        sent_at = mb.LEAD["pending"]
-        capture(sent_at + 0.15)                                                 # 送ってから 150 ms 後に窓 (中央 175 ms)
-        assert len(mb.LEAD["obs"]) == 1 and abs(mb.LEAD["obs"][0] - 0.175) < 1e-6
-        # 3 回目の予測は 実測 175 ms + モーションの古さ (>= 20 ms) を先読みにする
-        assert seen[2] >= 0.175 + 0.02 - 1e-6 and seen[2] <= PC.HORIZON_GRID[-1], seen
-        log.close()
-        rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
-        assert [r["horizon_mode"] for r in rows] == ["auto"] * 3 and float(rows[2]["horizon"]) == seen[2]
-        assert rows[0]["t_motion"] != ""
-    finally:
-        mb.PHASE_MODEL = None
-        mb.OPTS.update(auto_phase=False, horizon=PC.HORIZON_AUTO, swap_lr=False)
-        mb.LAST.pop("pred", None)
-        mb.bg.STATE.live["phase_deg"] = 180.0
-        mb.bg.COMMANDS.clear()
-    # 画面・コマンドラインの値
-    assert PC.parse_horizon("auto") == PC.HORIZON_AUTO and PC.parse_horizon("0.2") == 0.2
-    try:
-        PC.parse_horizon(0.15)
-        raise AssertionError("0.15 は固定の先読みとしては受け付けない")
+        PC.parse_horizon(0.12)
+        raise AssertionError("HORIZONS に無い先読みは受け付けない")
     except ValueError:
         pass
+
+
+def test_pipelined_worker(tmp_path=None):
+    """収録ワーカー (装置は偽物): 位相を変えてから撮る・収録と処理が重なる・撮った数だけ記録される。"""
+    import ad3
+    import bench
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    mb.bg.CAPTURE_ROOT = tmp
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    events = []                                               # (時刻, 何を, 値)
+    lock = threading.Lock()
+
+    def ev(kind, v=None):
+        with lock:
+            events.append((time.perf_counter(), kind, v))
+
+    class Dwf:
+        def FDwfAnalogOutNodePhaseSet(self, h, ch, node, deg):
+            ev("phase", round(deg.value, 2))
+
+        def FDwfAnalogOutConfigure(self, h, ch, start):
+            pass
+
+    class FakeAd3:
+        def __init__(self, serial, keep_running=True):
+            self.info = dict(serial=serial)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeBridge:
+        def __init__(self, dev, hz, level):
+            self.d, self.h, self.fs, self.level = Dwf(), 1, 100e6, level
+
+        def both(self, deg, scale):
+            ev("both", deg)
+
+        def set_phase(self, deg):
+            ev("phase_manual", deg)
+
+        def setup_record(self, seconds):
+            self.n = int(seconds * self.fs / 100)                 # 点数は小さくしておく
+            return dict(n=self.n, range_v=2.0, offset_v=0.0, volts_per_lsb=1e-4)
+
+        def record(self):
+            t0 = time.perf_counter()
+            ev("record_start")
+            mb.CAPTURE.update(t0=t0, n=self.n, fs=self.fs)
+            time.sleep(0.03)                                      # 窓 + 転送
+            ev("record_end")
+            return np.zeros(self.n, np.int16), time.perf_counter() - t0
+
+        def close(self):
+            ev("close")
+
+    class FakeRx:
+        def __init__(self, fs, **kw):
+            self.fs, self.P = fs, NS()
+
+        def process(self, x, detail=False):
+            ev("process_start")
+            time.sleep(0.06)                                      # 処理は収録より遅い → 収録が待つ
+            ev("process_end")
+            st = np.arange(0, 20 * 600, 600, dtype=np.int64)
+            return dict(frames=20, frames_expected=20, bits=12000, errors=1, sync_quality=0.9, eye=0.8, t_demod=0.001,
+                        status=np.zeros(st.size, int), frame_errors=np.zeros(st.size, int), starts=st)
+
+    orig = dict(Ad3=ad3.Ad3, Bridge=bench.Bridge, tag_play=bench.tag_play, power_set=mb.bg.power_set,
+                make_view=mb.bg.make_view, fast_ddc=mb.fd.fast_ddc, FastReceiver=mb.fd.FastReceiver)
+    ad3.Ad3, bench.Bridge = FakeAd3, FakeBridge
+    bench.tag_play = lambda *a, **k: dict(points=1000, frame_s=0.0004994, what=a[1])
+    mb.bg.power_set = lambda on: dict(ok=True, message="")
+    mb.bg.make_view = lambda *a, **k: None
+    mb.fd.fast_ddc = lambda codes, *a, **k: np.zeros(codes.size // 8, np.complex64)
+    mb.fd.FastReceiver = FakeRx
+    vals = iter(200.0 + np.arange(100))
+    mb.PHASE_MODEL = NS(predict_phase=lambda m: dict(phase=float(next(vals))))
+    mb.OPTS["auto_phase"] = True
+    warm0, mb.phase_control.REF_WARMUP = mb.phase_control.REF_WARMUP, 1
+    mb.bg.STATE.live.update(phase_deg=180.0, drive="both", seconds=0.095, record_raw=False, div=8)
+    mb.bg.STOP.clear()
+    try:
+        th = threading.Thread(target=mb.live_worker, args=("R", "T", 600), daemon=True)
+        th.start()
+        t_end = time.time() + 10
+        while time.time() < t_end and sum(e[1] == "record_end" for e in events) < 6:
+            time.sleep(0.01)
+        mb.bg.STOP.set()
+        th.join(timeout=10)
+        assert not th.is_alive()
+        assert "エラー" not in mb.bg.STATE.status, (mb.bg.STATE.status, mb.bg.STATE.error)
+        kinds = [e[1] for e in events]
+        n_rec = kinds.count("record_end")
+        assert n_rec >= 6 and kinds.count("process_end") == n_rec            # 撮った分は全部処理してから閉じる
+        assert kinds[-1] == "close"
+        # 2 回目からは「位相を変える → 撮る」(1 回目は基準を取るだけで 180° のまま)
+        rec_i = [i for i, k in enumerate(kinds) if k == "record_end"]
+        ph = [e[2] for e in events if e[1] == "phase"]
+        assert ph[:3] == [181.0, 182.0, 183.0], ph
+        for j in range(1, 4):
+            last_phase = max(i for i, k in enumerate(kinds[:rec_i[j]]) if k == "phase")
+            assert last_phase > rec_i[j - 1]                                  # 前の収録の後、この収録の前に変えた
+        # 収録と処理が重なっている (k 回目の処理中に k+1 回目を撮っている)
+        ps = [e[0] for e in events if e[1] == "process_start"]
+        pe = [e[0] for e in events if e[1] == "process_end"]
+        re_ = [e[0] for e in events if e[1] == "record_end"]
+        assert any(ps[k] < re_[k + 1] < pe[k] for k in range(len(pe) - 1))
+        # k 回目の処理は、k+1 回目の収録が始まってから (予測と CPU を取り合わない)。最後の 1 回だけは止めるときにすぐ
+        rs = [e[0] for e in events if e[1] == "record_start"]
+        assert all(ps[k] >= rs[k + 1] for k in range(len(rs) - 1)), "処理が次の収録の前に始まっている"
+        d = mb.bg.SESSION.dir
+        b = list(csv.DictReader(open(d / "ber_motion.csv", encoding="utf-8")))
+        p = list(csv.DictReader(open(d / "phase_pred.csv", encoding="utf-8")))
+        assert len(b) == n_rec and [r["cap"] for r in b] == [str(k) for k in range(1, n_rec + 1)]
+        assert [r["phase_src"] for r in b] == ["auto"] * n_rec
+        assert [float(r["phase"]) for r in b[:3]] == [180.0, 181.0, 182.0]   # 記録の位相 = その収録で使った位相
+        assert [float(r["phase"]) for r in p[:3]] == [180.0, 181.0, 182.0] and p[0]["cap"] == "1"
+        assert len(list(csv.DictReader(open(d / "ber_log.csv", encoding="utf-8")))) == n_rec
+        cond = json.loads((d / "conditions.json").read_text(encoding="utf-8"))
+        assert cond["phase_settle_s"] == mb.phase_control.PHASE_SETTLE_S and cond["seconds"] == 0.095
+        # 画面の「補正の状況」: 収録ごとに BER とその収録の位相・補正量・先読みの実測
+        cr = mb.corr_recent()
+        assert [c["cap"] for c in cr] == list(range(1, n_rec + 1)) and [c["phase"] for c in cr[:3]] == [180.0, 181.0, 182.0]
+        assert cr[1]["src"] == "auto" and cr[1]["delta"] == 1.0 and cr[1]["errors"] == 1
+        assert cr[0]["warmup"] == 1 and cr[1]["warmup"] == 0 and cr[1]["lead_ms"] is None    # モーションを流していない
+        assert mb.motion_status()["corr"][-1]["cap"] == n_rec
+    finally:
+        ad3.Ad3, bench.Bridge, bench.tag_play = orig["Ad3"], orig["Bridge"], orig["tag_play"]
+        mb.bg.power_set, mb.bg.make_view = orig["power_set"], orig["make_view"]
+        mb.fd.fast_ddc, mb.fd.FastReceiver = orig["fast_ddc"], orig["FastReceiver"]
+        mb.phase_control.REF_WARMUP = warm0
+        mb.PHASE_MODEL, mb.OPTS["auto_phase"] = None, False
+        mb.bg.STATE.live.update(phase_deg=180.0, seconds=0.1)
+        mb.bg.STOP.clear()
+        mb.bg.STATE.mode = "idle"
+
+
+def test_live_pred_overlay(tmp_path=None):
+    """ライブの「予測を重ねる」: 位相を決めた予測した姿勢 (_pose) は記録に書かず、窓が済んだら窓の実際の姿勢と比べる。"""
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    n = len(mb.MOTION.names)
+    vals = iter([200.0, 203.0])
+
+    def predict(m):
+        pose = np.asarray(m["history"][1][-1], float) + 0.01               # 最後のフレームから 1 cm ずらした「予測」
+        return dict(phase=next(vals), phase_actual=next(iter([170.0])), _pose=pose)
+
+    mb.PHASE_MODEL = NS(predict_phase=predict, phase_for_pose=lambda names, xyz: 171.5)
+    mb.OPTS.update(auto_phase=True)
+    warm0, mb.phase_control.REF_WARMUP = mb.phase_control.REF_WARMUP, 1
+    try:
+        log = _session(tmp)
+        t = time.perf_counter()
+        for k in range(40):
+            mb.MOTION._ingest(t - 0.4 + k / 100, k, 0.0, None, np.zeros((n, 3)))
+        assert mb.live_pred_view()["ready"] is False
+        assert log.phase_before_capture(1) == 180.0                              # 基準を取る回は重ねない
+        assert len(mb.LIVE_PRED) == 0
+        assert log.phase_before_capture(2) == 183.0
+        assert len(mb.LIVE_PRED) == 1 and mb.LIVE_PRED[0]["cap"] == 2
+        assert "_pose" not in mb.LAST["pred"]
+        json.dumps(mb.motion_status())                                           # 画面に送る値に配列が混ざっていない
+        t0 = time.perf_counter()
+        for k in range(5):                                                       # 窓の中の実際の姿勢 (0 のまま)
+            mb.MOTION._ingest(t0 + k * 0.01, 100 + k, 0.0, None, np.zeros((n, 3)))
+        mb.live_pred_window(2, t0 - 0.001, t0 + 0.05)
+        assert mb.live_pred_view()["ready"] is False                             # 窓がまだ済んでいない
+        time.sleep(0.06)
+        v = mb.live_pred_view()
+        assert v["ready"] and v["live"] and v["cap"] == 2 and v["phase_act"] == 171.5 and v["phase_pred"] == 170.0
+        assert all(abs(e - np.sqrt(3) * 10) < 0.2 for e in v["err_mm"]), v["err_mm"]     # 各軸 1 cm → √3 cm
+        assert v["ref"][0] == [0.0, 0.0, 0.0] and abs(v["xyz"][0][0] - 0.01) < 1e-9
+        log.close()
+        rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
+        assert not any(k.startswith("_") for k in rows[0])                      # "_" で始まる値はそのまま書かない
+        names = mb.MOTION.names                                                  # 予測した姿勢は pred_<マーカー>_X/Y/Z で残す
+        assert all(f"pred_{n}_{a}" in rows[0] for n in names for a in "XYZ")
+        assert abs(float(rows[1][f"pred_{names[0]}_X"]) - 0.01) < 1e-6
+    finally:
+        mb.phase_control.REF_WARMUP = warm0
+        mb.PHASE_MODEL, mb.OPTS["auto_phase"] = None, False
+        mb.LAST.pop("pred", None)
+        mb.bg.STATE.live["phase_deg"] = 180.0
+        mb.bg.COMMANDS.clear()
+        mb.LIVE_PRED.clear()
 
 
 def test_imp_phase_model():
@@ -256,6 +399,12 @@ def test_imp_phase_model():
     t = np.arange(0, 0.3, 0.01)
     assert M.spans_ok(t, 0.1, 0.25)[0] and not M.spans_ok(np.delete(t, [12, 13, 14, 15, 16, 17]), 0.1, 0.25)[0]
     assert not M.spans_ok(t, -0.01, 0.2)[0]                                   # 履歴が足りない
+    # Ridge の表現: chest 相対 ↔ 絶対座標が往復で戻り、全体の平行移動では表現が変わらない
+    P = np.random.default_rng(0).normal(size=(5, 21))
+    R = M.ridge_repr(P, "chest_rel")
+    assert R.shape == (5, 18) and np.allclose(M.from_repr(R, P, "chest_rel"), P)
+    assert np.allclose(M.ridge_repr(P + np.tile([0.1, -0.2, 0.3], 7), "chest_rel"), R)
+    assert M.ridge_repr(P, "abs") is P and M.from_repr(P, P, "abs") is P
 
     csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1111_1547_kajihara_@13.56MHz.csv"
     if not M.MODEL_PATH.exists() or not csv_path.exists():
@@ -277,6 +426,14 @@ def test_imp_phase_model():
     # 収録窓に合わせた半端な先読みは、学習してある 0.01 s 刻みのいちばん近いもので推定する
     out2 = M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.143))
     assert out2["horizon_model"] == 0.14 and M.ridge_horizon(0.5) == 0.3
+    # 再生の「予測を重ねる」: 全フレームまとめての予測は、ライブの 1 回ずつの予測と同じ値になる
+    fs = M.forecast_series(ts, xyz, names, 0.1)
+    k = int(np.searchsorted(ts, ts[40] + 0.1))                                # 起点 = ts[k] − 0.1 ≈ ts[40]
+    one = M.predict_phase(dict(names=names, history=(ts[(ts > ts[k] - 0.1 - 0.3) & (ts <= ts[k] - 0.1)],
+                                                     xyz[(ts > ts[k] - 0.1 - 0.3) & (ts <= ts[k] - 0.1)]), horizon=0.1))
+    assert fs["ok"][k] and abs(fs["phase_pred"][k] - one["phase_actual"]) < 0.5, (fs["phase_pred"][k], one["phase_actual"])
+    assert fs["xyz_pred"].shape == xyz.shape and not fs["ok"][:10].any()      # 最初は履歴が足りない
+    assert np.isfinite(fs["phase_act"]).all()
     xyz[sel.nonzero()[0][-8:], 2] = np.nan                                   # 直近 0.08 s が隠れた → 変えない
     assert M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1)) is None
 

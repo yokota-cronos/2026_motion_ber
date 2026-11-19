@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import threading
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +60,7 @@ class Replay:
         self.dir = Path(folder)
         mc = json.loads((self.dir / "motion_conditions.json").read_text(encoding="utf-8"))
         self.cond = json.loads((self.dir / "conditions.json").read_text(encoding="utf-8"))
+        self.mc = mc
         self.names = tuple(mc["marker_names"])
         self.group = mc.get("group", "upper")
 
@@ -78,6 +80,12 @@ class Replay:
                                   level=_float(r["level"]), phase=_float(r["phase"]),
                                   raw=raw if raw and (self.dir / raw).exists() else ""))
         self.cap_t0 = np.array([c["t0"] for c in self.caps])
+
+        # 位相の自動調整で使った先読み [s] (phase_pred.csv。無ければ None)。3D 表示の「予測を重ねる」の既定にする
+        pp = self.dir / "phase_pred.csv"
+        hs = [_float(r.get("horizon")) for r in _rows(pp)] if pp.exists() else []
+        hs = [h for h in hs if h == h]
+        self.horizon = float(np.median(hs)) if hs else None
 
         # テストフレーム
         f = _rows(self.dir / "frames.csv")
@@ -119,12 +127,17 @@ class Replay:
         self.duration = float(max(ends)) if ends else 0.0
 
     # ------------------------------------------------------------------ 時刻で引く
-    def pose(self, t: float) -> dict:
-        if self.tm.size == 0:
-            return dict(names=self.names, xyz=None, frame=None, receiving=False)
+    def index(self, t: float) -> int:
+        """時刻 t にいちばん近いモーションのフレームの番号 (motion.csv の行)。"""
         i = int(np.clip(np.searchsorted(self.tm, t), 1, self.tm.size - 1)) if self.tm.size > 1 else 0
         if self.tm.size > 1 and abs(self.tm[i - 1] - t) <= abs(self.tm[i] - t):
             i -= 1
+        return i
+
+    def pose(self, t: float) -> dict:
+        if self.tm.size == 0:
+            return dict(names=self.names, xyz=None, frame=None, receiving=False)
+        i = self.index(t)
         xyz = [None if np.isnan(p).any() else [round(float(v), 5) for v in p] for p in self.xyz[i]]
         return dict(names=self.names, xyz=xyz, frame=int(self.fr[i]), receiving=bool(abs(self.tm[i] - t) < 0.1))
 
@@ -207,6 +220,30 @@ class Replay:
             self.vjpeg = (k, buf.tobytes() if ok else None)
             return self.vjpeg[1]
 
+    def camera_view(self) -> dict | None:
+        """動画のカメラの位置 (Motive の座標 [m]) と体の中心。3D 表示をカメラと同じ向きから見せる用。
+
+        overlay_calib.json (動画への重ね合わせの較正。再生専用の画面で記録を開くと作られる) があるときだけ。
+        """
+        f = self.dir / "overlay_calib.json"
+        if not f.exists() or cv2 is None or self.tm.size == 0:
+            return None
+        try:
+            c = json.loads(f.read_text(encoding="utf-8"))
+            c = c.get("balls", c) if c.get("ok", True) else None
+            if not c or "rvec" not in c:
+                return None
+            R, _ = cv2.Rodrigues(np.asarray(c["rvec"], float))
+            pos = -R.T @ np.asarray(c["tvec"], float)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                body = np.nanmedian(self.xyz.reshape(-1, 3), axis=0)
+            if not np.isfinite(pos).all() or not np.isfinite(body).all():
+                return None
+            return dict(pos=[round(float(v), 4) for v in pos], body=[round(float(v), 4) for v in body])
+        except Exception:                                    # noqa: BLE001 (較正が壊れていても再生はできる)
+            return None
+
     def meta(self) -> dict:
         L = motion.BODY_LAYOUTS.get(self.group, motion.BODY_LAYOUTS["upper"])
         return dict(name=self.dir.name, duration=round(self.duration, 4), names=self.names, group=self.group,
@@ -215,7 +252,8 @@ class Replay:
                     caps=[dict(c, ber=None if c["ber"] != c["ber"] else c["ber"], raw=bool(c["raw"])) for c in self.caps],
                     video=self.has_video, n_raw=sum(1 for c in self.caps if c["raw"]),
                     motion_frames=int(self.tm.size), div=self.cond.get("div"), frame_s=self.cond.get("frame_s"),
-                    level_dbm=self.cond.get("level_dbm"), phase_deg=self.cond.get("phase_deg"))
+                    level_dbm=self.cond.get("level_dbm"), phase_deg=self.cond.get("phase_deg"), horizon=self.horizon,
+                    camera_view=self.camera_view())
 
     def close(self) -> None:
         with self.vlock:

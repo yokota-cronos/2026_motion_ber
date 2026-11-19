@@ -6,7 +6,9 @@
 手法は ../2026_motion_to_meander_imp/report_20261013_dataset1013ver1.pdf の 4 節 (モーションの先読み) と同じ
 (学習データは 1111。report_20261111_dataset1111.pdf も 4 節が同じ手順):
 
-  1. 過去 8 点 (0.02 s 間隔 = 0.14 s 分) のマーカー位置から、h 秒先のマーカー位置を Ridge で予測 (Ridge AR)
+  1. 過去 8 点 (0.02 s 間隔 = 0.14 s 分) のマーカー位置から、h 秒先のマーカー位置を Ridge で予測 (Ridge AR)。
+     Ridge に渡すのは chest に対する相対座標 (ridge_repr。2026-11-19 から。前かがみなどで chest が動いても腕の動きだけを見る)。
+     入力と出力は標準化してあり、α は学習時に選んである (train_imp_model.make_ridge。predict は元の単位 [m] で返す)
   2. 予測した姿勢から片側 6 特徴量を作り、左右それぞれの ExtraTrees で h 秒先のインピーダンスを推定
   3. 左右のインピーダンスから、搬送波の打ち消しが最も深くなる位相差を計算する (phase_for_impedance)
 
@@ -43,6 +45,19 @@ from phase_control import HORIZON_GRID, HORIZONS, PHASE_OFFSET_DEG  # 学習す�
 HERE = Path(__file__).resolve().parent
 DATASET = "1111"        # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
 MODEL_PATH = Path(os.environ.get("IMP_MODEL", HERE / "models" / f"imp_{DATASET}.joblib"))
+# 2026-11-19 に Ridge を標準化 + α 選択に作り直す前のモデル (標準化なし・α = 1)。それより前の記録を再生するとき、
+# 「補正に実際に使った予測」を記録時と同じモデルで出し直すのに使う (無ければ今のモデルで出し直す)
+LEGACY_MODEL_PATH = HERE / "models" / f"imp_{DATASET}_alpha1.joblib"
+LEGACY_UNTIL = "2026-11-19"
+
+
+def load_bundle(path) -> dict:
+    """モデルのファイルを読む (setup と違い、BUNDLE には入れない)。"""
+    import joblib
+    b = joblib.load(path)
+    for m in b["et"].values():
+        m.n_jobs = 1
+    return b
 
 W1_COIL = "L"           # リーダ W1 が駆動するコイル (= コイル A、タグ側)。左の体のコイル (2026-10-28 に確認)
 SERIES_OHM = 0.0        # コイルから加算点までの直列抵抗 [Ω]。Z に足してから位相を出す。**要確認**
@@ -92,9 +107,46 @@ def history_times(now) -> np.ndarray:
 
 
 def ar_design(Pq: np.ndarray):
-    """(M, TAPS, 21) の履歴 → Ridge の入力 (過去 7 点の「いまからの変位」) と、いまの位置。"""
+    """(M, TAPS, d) の履歴 → Ridge の入力 (過去 7 点の「いまからの変位」) と、いまの値。d は表現の次元 (21 か 18)。"""
     cur = Pq[:, -1]
     return (Pq[:, :-1] - cur[:, None]).reshape(len(Pq), -1), cur
+
+
+# --------------------------------------------------------------------------- Ridge に渡す表現
+# "chest_rel" (2026-11-19 から): chest 以外の 6 マーカーの、chest に対する相対座標 (18 次元)。前かがみ・歩くなどで
+#   chest そのものが動いても、腕と胸の位置関係だけを予測する。ExtraTrees の特徴量 (角度・胸基準の高さと水平距離) は
+#   平行移動で変わらないので、相対座標の予測だけで足りる。予測した姿勢 (画面・記録用) は「いまの chest の位置」に足して出す
+# "abs" (それまで): 7 マーカーの絶対座標 (21 次元)。古いモデル (ridge_input が無い) はこちら
+RIDGE_INPUT = "chest_rel"
+CHEST = MARKERS.index("chest")
+OTHERS = [i for i in range(len(MARKERS)) if i != CHEST]
+
+
+def ridge_repr(P: np.ndarray, mode: str) -> np.ndarray:
+    """(N, 21) の絶対座標 (MARKERS 順) → Ridge の表現 (N, 21 か 18)。"""
+    if mode == "abs":
+        return P
+    Q = P.reshape(len(P), len(MARKERS), 3)
+    return (Q[:, OTHERS] - Q[:, [CHEST]]).reshape(len(P), -1)
+
+
+def from_repr(R: np.ndarray, P_now: np.ndarray, mode: str) -> np.ndarray:
+    """Ridge の表現の予測 (N, d) → 絶対座標の姿勢 (N, 21)。chest_rel は、いまの chest の位置 (P_now から) に足す。"""
+    if mode == "abs":
+        return R
+    c = P_now.reshape(len(P_now), len(MARKERS), 3)[:, CHEST]
+    Q = np.empty((len(R), len(MARKERS), 3))
+    Q[:, CHEST] = c
+    Q[:, OTHERS] = R.reshape(len(R), len(OTHERS), 3) + c[:, None]
+    return Q.reshape(len(R), -1)
+
+
+def ridge_forecast(Pq: np.ndarray, h: float, B: dict) -> np.ndarray:
+    """(M, TAPS, 21) の絶対座標の履歴 (0.02 s 刻み、最後がいま) → h 秒先の姿勢 (M, 21)。モデルの表現 (ridge_input) に合わせる。"""
+    mode = B.get("ridge_input", "abs")
+    Rq = ridge_repr(Pq.reshape(-1, Pq.shape[-1]), mode).reshape(len(Pq), Pq.shape[1], -1)
+    X, cur = ar_design(Rq)
+    return from_repr(cur + B["ridge"][h].predict(X), Pq[:, -1], mode)
 
 
 def spans_ok(t: np.ndarray, a, b) -> np.ndarray:
@@ -127,6 +179,9 @@ def setup() -> None:
     b = joblib.load(MODEL_PATH)
     for m in b["et"].values():
         m.n_jobs = 1                # 1 点ずつしか推定しないので、スレッドを立てる方が遅い
+    if not b.get("ridge_scaled"):
+        raise RuntimeError(f"{MODEL_PATH} は Ridge を標準化していない古いモデルです (2026-11-19 から標準化 + α 選択)。"
+                           f"`uv run train_imp_model.py` で作り直してください")
     missing = [h for h in HORIZON_GRID if h not in b["ridge"]]
     if missing:
         raise RuntimeError(f"{MODEL_PATH} は先読み {sorted(b['ridge'])} s しか学習していません "
@@ -148,15 +203,19 @@ def ridge_horizon(h: float) -> float:
     return float(keys[np.argmin(np.abs(keys - h))])
 
 
-def forecast_impedance(t: np.ndarray, xyz: np.ndarray, names, h: float):
+def forecast_impedance(t: np.ndarray, xyz: np.ndarray, names, h: float, with_pose: bool = False, bundle=None):
     """直近のモーション → h 秒先の [L_Z_R, L_Z_X, R_Z_R, R_Z_X] [Ω]。履歴が足りなければ None。
 
     t: (k,) [s]、xyz: (k, マーカー数, 3) [m]、names: xyz の並び (Motive の配信順)。
     h は学習してある先読みのうちいちばん近いものに丸める (ridge_horizon)。
+    with_pose: True なら (Z, 予測した姿勢 (マーカー数, 3) を names の並びで) を返す (画面に重ねる用)。
+    bundle: 使うモデル (省略時は読み込んだモデル)。古い記録で、記録時のモデルの予測を出し直す用
     """
-    if BUNDLE is None:
+    if BUNDLE is None and bundle is None:
         setup()
-    h = ridge_horizon(h)
+    B = BUNDLE if bundle is None else bundle
+    keys = np.array(sorted(B["ridge"]))
+    h = float(keys[np.argmin(np.abs(keys - h))])
     missing = [m for m in MARKERS if m not in names]
     if missing:
         raise ValueError(f"マーカー {missing} がありません (計測部位を上半身にする)")
@@ -164,26 +223,94 @@ def forecast_impedance(t: np.ndarray, xyz: np.ndarray, names, h: float):
     ok = ~np.isnan(P).any(axis=1)                 # 1 点でも隠れていたフレームは使わない
     t = np.asarray(t, float)
     if not ok.any() or t[-1] - t[ok][-1] > MAX_GAP:
-        return None                               # 直近が隠れている (古い姿勢を「いま」として先読みしない)
+        return (None, None) if with_pose else None  # 直近が隠れている (古い姿勢を「いま」として先読みしない)
     t, P = t[ok], P[ok]
     tq = history_times(t[-1])
     if not spans_ok(t, tq[0], tq[-1])[0]:
-        return None
-    X, cur = ar_design(resample(t, P, tq)[None])
-    Pf = cur + BUNDLE["ridge"][h].predict(X)
+        return (None, None) if with_pose else None
+    Pf = ridge_forecast(resample(t, P, tq)[None], h, B)
     z = np.empty(4)
     for side, cols in SIDES.items():
-        z[list(cols)] = BUNDLE["et"][side].predict(side_features(Pf, side))[0]
-    return z
+        z[list(cols)] = B["et"][side].predict(side_features(Pf, side))[0]
+    if not with_pose:
+        return z
+    pose = np.full((len(names), 3), np.nan)
+    pose[[list(names).index(m) for m in MARKERS]] = Pf.reshape(len(MARKERS), 3)
+    return z, pose
+
+
+def phase_for_pose(names, xyz, bundle=None) -> float | None:
+    """1 つの姿勢 (マーカー数, 3) [m] (names の並び) → その姿勢のインピーダンスから出した実測の位相差 [°]。隠れていれば None。"""
+    if BUNDLE is None and bundle is None:
+        setup()
+    B = BUNDLE if bundle is None else bundle
+    P = np.asarray(xyz, float)[[list(names).index(m) for m in MARKERS]].reshape(1, -1)
+    if np.isnan(P).any():
+        return None
+    z = np.empty(4)
+    for side, cols in SIDES.items():
+        z[list(cols)] = B["et"][side].predict(side_features(P, side))[0]
+    return phase_for_impedance(z)
 
 
 def predict_phase(motion):
     """phase_control.py の約束どおり。位相に加えて、記録・表示用に推定したインピーダンスも返す。"""
     h = float(motion.get("horizon", HORIZONS[0]))
     t, xyz = motion["history"]
-    z = forecast_impedance(t, xyz, motion["names"], h)
+    z, pose = forecast_impedance(t, xyz, motion["names"], h, with_pose=True)
     if z is None:
         return None                               # マーカーが隠れていた → 位相は変えない
     actual = phase_for_impedance(z)
+    # "_" で始まる値は記録 (phase_pred.csv) に書かず、画面だけに使う (予測した姿勢を 3D 表示に重ねる)
     return dict(phase=actual + PHASE_OFFSET_DEG, phase_actual=round(actual, 2), horizon_model=ridge_horizon(h),
-                **{k: round(float(v), 3) for k, v in zip(TARGETS, z)})
+                **{k: round(float(v), 3) for k, v in zip(TARGETS, z)}, _pose=pose)
+
+
+# --------------------------------------------------------------------------- 記録の答え合わせ (再生の画面)
+def forecast_series(t: np.ndarray, xyz: np.ndarray, names, h: float) -> dict:
+    """記録の全フレームについて「その時刻の h 秒前までの履歴から予測した姿勢」をまとめて出す。
+
+    ライブの forecast_impedance と同じ手順 (過去 8 点を 0.02 s 刻みに補間 → Ridge で h 秒先の変位) を、
+    起点を各フレームの時刻 − h にして全フレームぶん回す。実際の姿勢と比べれば、Ridge の先読みの当たり外れが見える。
+
+    t: (N,) [s]、xyz: (N, マーカー数, 3) [m] (names の並び、隠れは NaN)、names: モデルに渡す名前 (本人の左右)。
+    返す: xyz_pred (N, マーカー数, 3) (予測できないフレームは NaN)、ok (N,)、
+          phase_pred / phase_act (N,) = 予測した姿勢 / 実際の姿勢から出した「実測の」位相差 [°] (出せなければ NaN)。
+    """
+    if BUNDLE is None:
+        setup()
+    t = np.asarray(t, float)
+    idx = [list(names).index(m) for m in MARKERS]
+    P = np.asarray(xyz, float)[:, idx, :].reshape(len(t), -1)
+    vis = ~np.isnan(P).any(axis=1)
+    out = np.full(P.shape, np.nan)
+    ph_pred = np.full(len(t), np.nan)
+    ph_act = np.full(len(t), np.nan)
+    if vis.sum() >= TAPS:
+        tv, Pv = t[vis], P[vis]
+        now = t - h
+        ok = spans_ok(tv, now - (TAPS - 1) * STEP, now)
+        k = np.nonzero(ok)[0]
+        if k.size:
+            Pq = resample(tv, Pv, history_times(now[k]).ravel()).reshape(k.size, TAPS, -1)
+            out[k] = ridge_forecast(Pq, ridge_horizon(h), BUNDLE)
+
+        def phases(Q, sel):
+            z = np.empty((sel.size, 4))
+            for side, cols in SIDES.items():
+                z[:, list(cols)] = BUNDLE["et"][side].predict(side_features(Q[sel], side))
+            zl = (z[:, 0] + SERIES_OHM) + 1j * z[:, 1]               # phase_for_impedance と同じ式をまとめて
+            zr = (z[:, 2] + SERIES_OHM) + 1j * z[:, 3]
+            za, zb = (zl, zr) if W1_COIL == "L" else (zr, zl)
+            return 180.0 + np.degrees(np.angle(zb / za))
+
+        if k.size:
+            ph_pred[k] = phases(out, k)
+        a = np.nonzero(vis)[0]
+        if a.size:
+            ph_act[a] = phases(P, a)
+    else:
+        ok = np.zeros(len(t), bool)
+    back = np.full(np.asarray(xyz).shape, np.nan)                   # names の並びに戻す
+    back[:, idx, :] = out.reshape(len(t), len(MARKERS), 3)
+    return dict(xyz_pred=back, ok=ok, phase_pred=ph_pred, phase_act=ph_act, h=float(h), h_model=ridge_horizon(h))

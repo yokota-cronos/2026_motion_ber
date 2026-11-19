@@ -16,6 +16,11 @@
   * ExtraTrees を 100 本・葉の最小サンプル数 5 にした (レポートは 500 本・1)。1013ver1 では、レポートの分割で比べて
     test の RMSE は 4 ターゲットとも同じか少し良く (L_Z_X 1.487 → 1.459 Ω)、ファイルは 6.5 GB → 約 0.2 GB、
     1 点の推定は 71 → 13 ms だった
+  * Ridge の入力と出力は chest に対する相対座標 (imp_phase_model.RIDGE_INPUT。2026-11-19 から。前かがみ・腕を大きく
+    上げる動きで chest が動いても、腕と胸の位置関係だけを予測する)
+  * Ridge は入力と出力を標準化し、α を学習フレームの後ろ 1 割 (時間で切る) で選ぶ (レポートは標準化なし・α = 1)。
+    1111 の 20 ブロック分割で 0.1 s 先の位相の RMSE 3.15 → 3.07°・0.2 s 先 4.34 → 4.01°。1118_1449 では 4.49 → 4.30°
+    (2026-11-19、A 座標そのまま / B chest 相対 / C 特徴量 を比べた結果。3 つの差より標準化の効果が大きかった)
 """
 from __future__ import annotations
 
@@ -63,21 +68,60 @@ def load(dataset: str):
     return out, thresh
 
 
-def ar_samples(sess: dict, h: float, idx: np.ndarray):
-    """フレーム idx の時刻を「いま」とした Ridge の入力と、h 秒先の変位。履歴か先が欠けるものは落とす。"""
+def ar_samples(sess: dict, h: float, idx: np.ndarray, mode: str = M.RIDGE_INPUT):
+    """フレーム idx の時刻を「いま」とした Ridge の入力と、h 秒先の変位 (どちらも表現 mode で)。履歴か先が欠けるものは落とす。
+
+    返す: X、先の変位、いまの値 (表現 mode)、使ったフレーム、いまの絶対座標 (表現から姿勢に戻す用)。
+    """
     t, P = sess["t"][sess["vis"]], sess["P"][sess["vis"]]   # 実行時と同じく、隠れたフレームは補間に使わない
     now = sess["t"][idx]
     keep = M.spans_ok(t, now - (M.TAPS - 1) * M.STEP, now + h)
     now = now[keep]
     tq = M.history_times(now)                                           # (n, TAPS)
     Pq = M.resample(t, P, tq.ravel()).reshape(len(now), M.TAPS, -1)
-    X, cur = M.ar_design(Pq)
-    return X, M.resample(t, P, now + h) - cur, cur, idx[keep]
+    Rq = M.ridge_repr(Pq.reshape(-1, Pq.shape[-1]), mode).reshape(len(now), M.TAPS, -1)
+    X, cur = M.ar_design(Rq)
+    fut = M.ridge_repr(M.resample(t, P, now + h), mode)
+    return X, fut - cur, cur, idx[keep], Pq[:, -1]
+
+
+RIDGE_ALPHAS = (1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1e3, 1e4)   # 標準化した入力・出力に対する正則化の強さの候補
+RIDGE_VAL = 0.1                                                   # α を選ぶ検証に使う、学習フレームの後ろの割合 (時間で切る)
+
+
+def make_ridge(alpha: float):
+    """入力 (過去 7 点の変位 147 列) と出力 (21 列) をそれぞれ平均 0・標準偏差 1 にそろえてから解く Ridge。
+
+    そろえないと、正則化 α × Σ係数² が列の大きさ (0.02 s 前の変位は数 mm、0.14 s 前は数 cm) によって効き方が変わる。
+    predict は元の単位 (m) で返すので、呼ぶ側 (imp_phase_model) はそのまま使える。
+    """
+    from sklearn.compose import TransformedTargetRegressor
+    from sklearn.linear_model import Ridge
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    return TransformedTargetRegressor(regressor=make_pipeline(StandardScaler(), Ridge(alpha=alpha)),
+                                      transformer=StandardScaler())
+
+
+def fit_ridge(sessions, idx_by_sess, h: float):
+    """先読み h の Ridge。α は学習フレームの後ろ RIDGE_VAL (時間で切る) で選び、全部で学習し直す。"""
+    def stack(idxs):
+        parts = [ar_samples(s, h, i) for s, i in zip(sessions, idxs)]   # 表現は M.RIDGE_INPUT (chest 相対)
+        return np.vstack([p[0] for p in parts]), np.vstack([p[1] for p in parts])
+
+    cut = [i[:int(len(i) * (1 - RIDGE_VAL))] for i in idx_by_sess]
+    val = [i[int(len(i) * (1 - RIDGE_VAL)):] for i in idx_by_sess]
+    Xf, Yf = stack(cut)
+    Xv, Yv = stack(val)
+    score = {a: float(np.mean((make_ridge(a).fit(Xf, Yf).predict(Xv) - Yv) ** 2 / Yv.var(axis=0)))
+             for a in RIDGE_ALPHAS}
+    alpha = min(score, key=score.get)
+    X, Y = stack(idx_by_sess)
+    return make_ridge(alpha).fit(X, Y), alpha, len(X)
 
 
 def fit(sessions, idx_by_sess, trees: int, leaf: int):
     from sklearn.ensemble import ExtraTreesRegressor
-    from sklearn.linear_model import Ridge
 
     et = {}
     for side, cols in M.SIDES.items():
@@ -87,15 +131,13 @@ def fit(sessions, idx_by_sess, trees: int, leaf: int):
         et[side] = ExtraTreesRegressor(n_estimators=trees, min_samples_leaf=leaf, random_state=SEED,
                                          n_jobs=-1).fit(X, y)
         print(f"  ExtraTrees {side}: {len(X)} フレーム、{time.perf_counter() - t0:.1f} s")
-    ridge = {}
-    for h in M.HORIZON_GRID:                                           # 収録窓に合わせるため 0.02〜0.30 s の 0.01 刻み
-        parts = [ar_samples(s, h, i) for s, i in zip(sessions, idx_by_sess)]
-        X = np.vstack([p[0] for p in parts])
-        Y = np.vstack([p[1] for p in parts])
-        ridge[h] = Ridge(alpha=1.0).fit(X, Y)                           # レポートと同じ alpha
-    print(f"  Ridge AR {M.HORIZON_GRID[0]:.2f}〜{M.HORIZON_GRID[-1]:.2f} s 先 ({len(ridge)} 本): "
-          f"{len(X)} サンプル ({M.HORIZON_GRID[-1]:.2f} s 先のとき)")
-    return et, ridge
+    ridge, alphas = {}, {}
+    for h in M.HORIZON_GRID:                                           # 0.02〜0.30 s の 0.01 刻み
+        ridge[h], alphas[h], n = fit_ridge(sessions, idx_by_sess, h)
+    print(f"  Ridge AR {M.HORIZON_GRID[0]:.2f}〜{M.HORIZON_GRID[-1]:.2f} s 先 ({len(ridge)} 本、標準化 + α 選択): "
+          f"{n} サンプル ({M.HORIZON_GRID[-1]:.2f} s 先のとき)")
+    print("    選んだ α: " + "  ".join(f"{h:g} s→{alphas[h]:g}" for h in M.HORIZONS))
+    return et, ridge, alphas
 
 
 def evaluate(sessions, trees: int, leaf: int, dataset: str) -> None:
@@ -108,7 +150,7 @@ def evaluate(sessions, trees: int, leaf: int, dataset: str) -> None:
         a, b = block_split(len(s["t"]), n_blocks=20, gap=int(round(0.5 * fs)), phase=1)
         tr.append(a[s["ok"][a]])
         te.append(b[s["ok"][b]])
-    et, ridge = fit(sessions, tr, trees, leaf)
+    et, ridge, _ = fit(sessions, tr, trees, leaf)
     ref = REPORT_RMSE.get(dataset)
     print("\n  test の RMSE [Ω]" + (f" (レポート 4 節の Ridge AR → ET: {ref}。あちらはフレーム数で数えている)"
                                   if ref else ""))
@@ -127,14 +169,14 @@ def evaluate(sessions, trees: int, leaf: int, dataset: str) -> None:
                 Ps.append(s["P"][i])
                 ys.append(s["y"][i])
                 continue
-            X, _, cur, k = ar_samples(s, h, i)
-            Ps.append(cur + ridge[h].predict(X))
+            X, _, cur, k, Pnow = ar_samples(s, h, i)
+            Ps.append(M.from_repr(cur + ridge[h].predict(X), Pnow, M.RIDGE_INPUT))
             ys.append(np.vstack([np.interp(s["t"][k] + h, s["t"], s["y"][:, j]) for j in range(4)]).T)
         P, y = np.vstack(Ps), np.vstack(ys)
         z = z_of(P)
         rmse = np.sqrt(np.mean((z - y) ** 2, axis=0))
         ph = np.array([M.phase_for_impedance(v) for v in z]) - np.array([M.phase_for_impedance(v) for v in y])
-        label = "現在" if h == 0.0 else f"{h:.1f} s 先"
+        label = "現在" if h == 0.0 else f"{h:g} s 先"
         print("  " + f"{label:>8} " + "".join(f"{v:9.2f}" for v in rmse) + f"{np.sqrt(np.mean(ph ** 2)):9.2f}")
     print("  (位相° = 推定した Z から出した位相と、実測の Z から出した位相の差の RMSE)\n")
 
@@ -156,14 +198,14 @@ def main() -> int:
         print("\n評価 (20 ブロック分割)")
         evaluate(sessions, a.trees, a.leaf, a.dataset)
     print("全フレームで学習")
-    et, ridge = fit(sessions, [np.where(s["ok"])[0] for s in sessions], a.trees, a.leaf)
+    et, ridge, alphas = fit(sessions, [np.where(s["ok"])[0] for s in sessions], a.trees, a.leaf)
 
     import joblib
     a.out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(dict(
         dataset=a.dataset, sessions=[s["name"] for s in sessions], trained=datetime.now().isoformat(timespec="seconds"),
         steady_thresh=thresh, trees=a.trees, leaf=a.leaf, markers=M.MARKERS, targets=M.TARGETS, taps=M.TAPS, step=M.STEP,
-        et=et, ridge=ridge,
+        et=et, ridge=ridge, ridge_alpha=alphas, ridge_scaled=True, ridge_input=M.RIDGE_INPUT,
     ), a.out)
     print(f"  -> {a.out} ({a.out.stat().st_size / 1e6:.0f} MB)")
     return 0

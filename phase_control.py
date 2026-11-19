@@ -6,7 +6,7 @@
 
   motion_ber_gui.py --phase-model my_model.py
 
-で、そのファイルの `predict_phase(motion) -> float | None` を **収録 1 回ごとに 1 回**呼ぶ。
+で、そのファイルの `predict_phase(motion) -> float | None` を **収録 1 回ごとに 1 回、その収録の直前に**呼ぶ。
 返すのは「この姿勢で打ち消しが最も深くなる位相」[°] だが、**GUI はその絶対値ではなく変化ぶんだけを使う**:
 
     送る位相 = 初期位相 + (いま返した値 − 基準を取ったときに返した値)
@@ -14,31 +14,36 @@
 初期位相は、基準を取ったときの画面の位相 (手で合わせた値)。基準を取り直すのは、記録の開始・
 自動調整を入れたとき・先読みを変えたとき・手で位相を変えたとき。モデルの絶対値の誤差
 (直列抵抗、回路の位相ずれ、学習データと台のコイルの Z の違い) は初期位相の中で打ち消される。
-送る位相は GUI で位相を入れたのと同じ経路 (STATE.live + COMMANDS) で、次の収録の前に
-`Bridge.set_phase()` として反映される。None を返せば位相は変えない。
+
+1 回の流れ (motion_ber_gui.live_worker の収録スレッド):
+
+    predict_phase (約 26 ms) → 位相を変える (API 約 10 ms) → PHASE_SETTLE_S (5 ms) 待つ → 収録窓 (既定 95 ms)
+    → USB 転送 (95 ms 分で約 0.8 s。この間は次を撮れない) → 次の周へ。DDC・復調・記録は別スレッドで並行
+
+None を返せば位相は変えない (その収録は直前の位相のまま)。
 
 motion (dict):
     names     マーカー名 (配信順) のタプル。画面の「マーカーの左右が逆」(--swap-lr) が入っていれば
               R_* と L_* を入れ替えた名前 (= 本人の左右)。記録の CSV は Motive のラベルのまま
-    xyz       (7, 3) ndarray [m]。直近の収録窓の平均。見えていなかったマーカーは NaN
-    valid     収録窓のうち全マーカーが見えていたフレームの割合 (0..1)
-    t         収録窓の中央 [s、記録開始から]
+    xyz       (7, 3) ndarray [m]。いちばん新しいモーションのフレーム。見えていなかったマーカーは NaN
+    valid     そのフレームで全マーカーが見えていれば 1.0、そうでなければ 0.0
+    t         そのフレームの時刻 [s、記録開始から]
     history   (t (k,), xyz (k, 7, 3)): 呼んだ時点までの直近 HISTORY_SEC 秒の全フレーム (古い順、t は記録開始からの秒)。
-              先読みするモデル用。次の収録は、このあと位相を送る待ち (set_phase の 50 ms) などを挟んで始まる
-    horizon   先読み [s] = 「history の最後のフレーム → 次の収録窓の中央」の時間。
-              画面の「先読み」が「自動 (収録窓に合わせる)」なら、直近の収録で実測した時間から決める (毎回少し変わる)。
-              100 / 200 ms を選んでいればその値。使わないモデルは無視してよい
+              先読みするモデル用
+    horizon   固定の先読み [s] (画面の「先読み」、--horizon。既定 HORIZONS[0])。history の最後のフレームから、
+              この位相で撮る収録窓の中央までの時間に合わせてある。使わないモデルは無視してよい
     phase_deg いまの位相の指定値 [°]
     level_dbm いまのレベル [dBm]
     div       データレート FC/div
 
 戻り値は位相 [°] か None。dict(phase=..., ほかの値...) を返すと、ほかの値も記録フォルダの
-phase_pred.csv と画面に出る (推定したインピーダンスなど)。
+phase_pred.csv と画面に出る (推定したインピーダンスなど)。"_" で始まる値は記録に書かず、画面だけに使う
+(_pose = 予測した姿勢 (マーカー数, 3) を names の並びで。3D 表示の「予測を重ねる」が描く)。
 モジュールに setup() があれば、読み込んだときに 1 回呼ぶ (重いモデルの読み込みなど)。
 
 守ること:
   * 範囲は 90〜270° (GUI と同じ)。初期位相 + 補正がこれを外れたら、その回は位相を変えない。
-  * 呼ばれる頻度は収録の頻度 (1 秒に 1〜2 回) まで。それ以上速く位相を叩くと
+  * 呼ばれる頻度は収録の頻度 (1 秒に 1 回ほど) まで。それ以上速く位相を叩くと
     リーダが固まる (2026-10-09、無間隔 68 回で電源の入れ直しが要った)。
   * 位相の「指定値」と「実測」には +3.9° のずれがある (175.53 指定で実測 180.04°)。
     モデルが実測の位相を出すなら、ここで指定値に直すこと。
@@ -49,25 +54,26 @@ import importlib.util
 from pathlib import Path
 
 PHASE_MIN, PHASE_MAX = 90.0, 270.0
-HORIZONS = (0.1, 0.2)                     # 画面で選べる固定の先読み [s]
-HORIZON_AUTO = "auto"                     # 先読みを次の収録窓の中央に合わせる (既定)
-# 自動のときにモデルが受け付ける先読みの刻み [s]。imp_phase_model の Ridge はこの全部を学習しておく
-HORIZON_GRID = tuple(round(0.02 + 0.01 * i, 2) for i in range(29))      # 0.02〜0.30 s
-# 自動のとき: 「位相を決めた (predict_phase を呼んだ) 時刻 → 次の収録窓の中央」の初期値 [s]。
-# 記録の最初だけ使い、位相を送った収録が 1 回あれば実測 (直近 LEAD_KEEP 回の中央値) に替わる。
-# 2026-11-12 19:31 の記録では、送ってから収録開始まで中央値 103 ms (p10 94・p90 133) + 窓 50 ms の半分
-LEAD_DEFAULT = 0.13
-LEAD_KEEP = 10
+# 画面で選べる固定の先読み [s]。先頭が既定。0.1 s = 「最後のモーションのフレーム → 収録窓 (95 ms) の中央」:
+#   フレームの古さ (Motive で ~10 ms) + predict_phase ~26 ms + 位相の API と PHASE_SETTLE_S ~16 ms + 窓の半分 47.5 ms
+#   2026-11-18 に実機で測ると、合成モーション (古さ 4 ms) で中央値 95 ms (p10 88・p90 101)
+# 実際の値は phase_pred.csv の t_motion と ber_motion.csv の t_start / t_end で確かめられる
+HORIZONS = (0.1, 0.15, 0.2)
+# imp_phase_model の Ridge が学習しておく先読みの刻み [s] (0.02〜0.30 s)。HORIZONS はこの中から選ぶ
+HORIZON_GRID = tuple(round(0.02 + 0.01 * i, 2) for i in range(29))
+PHASE_SETTLE_S = 0.005                    # 自動調整で位相を変えてから収録を始めるまで待つ時間 [s] (README「約 5 ms で移る」)
+REF_WARMUP = 5                            # 基準のモデルの位相 = 最初のこの回数の中央値。その間は位相を変えない
+CAPTURE_SECONDS = 0.095                  # 既定の収録窓 [s]。位相の 5 ms と合わせて 100 ms
 
 
-def parse_horizon(v):
-    """画面・コマンドラインの先読み ("auto" / 0.1 / 0.2) → HORIZON_AUTO か float。"""
-    if str(v).strip().lower() == HORIZON_AUTO:
-        return HORIZON_AUTO
-    h = float(v)
+def parse_horizon(v) -> float:
+    """画面・コマンドラインの先読み → float (HORIZONS のどれか)。"""
+    h = round(float(v), 3)
     if h not in HORIZONS:
-        raise ValueError(f"先読みは {HORIZON_AUTO} か {HORIZONS} s のどれか")
+        raise ValueError(f"先読みは {HORIZONS} s のどれか")
     return h
+
+
 HISTORY_SEC = 0.3                         # motion["history"] に渡す長さ [s]
 PHASE_OFFSET_DEG = 175.53 - 180.04        # 実測 → 指定値 (README「実測で決めた値」)
 
