@@ -1,10 +1,11 @@
 """imp_phase_model.py -- モーション → 先のインピーダンス → W2−W1 位相差 (`--phase-model` に渡すモデル)。
 
-    uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1111.joblib を作る
+    uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1118.joblib を作る
     uv run motion_ber_gui.py --phase-model imp_phase_model.py  # 画面の「位相の自動調整」で入り切り
 
 手法は ../2026_motion_to_meander_imp/report_20261013_dataset1013ver1.pdf の 4 節 (モーションの先読み) と同じ
-(学習データは 1111。report_20261111_dataset1111.pdf も 4 節が同じ手順):
+(学習データは 1118。report_20261111_dataset1111.pdf・report_20261118_dataset1118.pdf も 4 節が同じ手順。
+ 1118 はマーカー欠落・取り違えのフレーム (marker_qc) を学習から外している):
 
   1. 過去 8 点 (0.02 s 間隔 = 0.14 s 分) のマーカー位置から、h 秒先のマーカー位置を Ridge で予測 (Ridge AR)。
      Ridge に渡すのは chest に対する相対座標 (ridge_repr。2026-11-19 から。前かがみなどで chest が動いても腕の動きだけを見る)。
@@ -18,7 +19,7 @@ GUI はこの位相の**変化ぶんだけ**を、手で合わせた初期位相
 h は motion["horizon"]。既定 (画面の「先読み」が自動) では、GUI が実測した「最後のモーション → 次の収録窓の中央」
 (2026-11-12 の記録で約 0.14 s)。Ridge は 0.02〜0.30 s を 0.01 s 刻みで学習しておき、いちばん近いものを使う。
 固定の 0.1 s / 0.2 s も選べる。レポートの L_Z_X の RMSE は、現在推定 / 0.1 s 先 /
-0.2 s 先で 1013ver1 が 1.49 / 1.74 / 2.36 Ω、1111 が 0.95 / 1.23 / 2.03 Ω。
+0.2 s 先で 1013ver1 が 1.49 / 1.74 / 2.36 Ω、1111 が 0.95 / 1.23 / 2.03 Ω、1118 が 1.74 / 1.99 / 2.67 Ω。
 
 **レポートとの違い:** レポートは「過去 8 点」「h 秒先」をフレーム数で数えている (VNA の掃引落ちで 1111 は 14.8 %、
 1013ver1 は 16.8 % の刻みが欠けているので、0.2 s 指定で実効 0.23〜0.24 s 程度)。ここではライブで使う都合上、**時刻で数える**
@@ -43,11 +44,12 @@ import numpy as np
 from phase_control import HORIZON_GRID, HORIZONS, PHASE_OFFSET_DEG  # 学習する先読み = HORIZON_GRID (0.02〜0.30 s、0.01 刻み)
 
 HERE = Path(__file__).resolve().parent
-DATASET = "1111"        # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
+DATASET = "1118"        # 学習データ (../2026_motion_to_meander_imp の report0923_common.DATASETS のキー)
 MODEL_PATH = Path(os.environ.get("IMP_MODEL", HERE / "models" / f"imp_{DATASET}.joblib"))
 # 2026-11-19 に Ridge を標準化 + α 選択に作り直す前のモデル (標準化なし・α = 1)。それより前の記録を再生するとき、
 # 「補正に実際に使った予測」を記録時と同じモデルで出し直すのに使う (無ければ今のモデルで出し直す)
-LEGACY_MODEL_PATH = HERE / "models" / f"imp_{DATASET}_alpha1.joblib"
+# (そのころの学習データは 1111 なので、DATASET を替えてもこのファイルのまま)
+LEGACY_MODEL_PATH = HERE / "models" / "imp_1111_alpha1.joblib"
 LEGACY_UNTIL = "2026-11-19"
 
 

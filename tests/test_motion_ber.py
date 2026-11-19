@@ -406,9 +406,9 @@ def test_imp_phase_model():
     assert np.allclose(M.ridge_repr(P + np.tile([0.1, -0.2, 0.3], 7), "chest_rel"), R)
     assert M.ridge_repr(P, "abs") is P and M.from_repr(P, P, "abs") is P
 
-    csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1111_1547_kajihara_@13.56MHz.csv"
+    csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1118_1449_kajihara_@13.56MHz.csv"
     if not M.MODEL_PATH.exists() or not csv_path.exists():
-        print("  (学習済みモデルか 1111 の CSV が無いので、推定は確かめない)")
+        print("  (学習済みモデルか 1118 の CSV が無いので、推定は確かめない)")
         return
     rows = list(csv.DictReader(open(csv_path, encoding="utf-8")))[3000:3100]
     names = motion.MARKER_GROUPS["upper"]["names"]                            # Motive の配信順 (MARKERS とは違う)
@@ -417,10 +417,10 @@ def test_imp_phase_model():
     sel = (ts > ts[40] - 0.3) & (ts <= ts[40])
     out = M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1))
     assert out is not None
-    # 0.1 s 先の実測 (入れ替え補正つき: 1111 も CSV の leftbody が右のコイル)
+    # 0.1 s 先の実測 (1118 は入れ替え不要: CSV の leftbody が左のコイル。1013ver1・1111 は逆だった)
     k = int(np.searchsorted(ts, ts[40] + 0.1))
-    real = [float(rows[k][c]) for c in ("rightbody_Z_R_13.56", "rightbody_Z_X_13.56",
-                                        "leftbody_Z_R_13.56", "leftbody_Z_X_13.56")]
+    real = [float(rows[k][c]) for c in ("leftbody_Z_R_13.56", "leftbody_Z_X_13.56",
+                                        "rightbody_Z_R_13.56", "rightbody_Z_X_13.56")]
     assert all(abs(out[n] - v) < 10 for n, v in zip(M.TARGETS, real)), (out, real)
     assert 90 <= out["phase"] <= 270
     # 収録窓に合わせた半端な先読みは、学習してある 0.01 s 刻みのいちばん近いもので推定する

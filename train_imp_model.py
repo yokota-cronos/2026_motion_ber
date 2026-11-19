@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """train_imp_model.py -- imp_phase_model.py が使うモデル (Ridge AR + ExtraTrees) を学習して保存する。
 
-    uv run train_imp_model.py              # 1111 で学習 → models/imp_1111.joblib
+    uv run train_imp_model.py              # 1118 で学習 → models/imp_1118.joblib
     uv run train_imp_model.py --eval       # 先に 20 ブロック分割で精度を出す (レポートの 4 節と比べる用)
     uv run train_imp_model.py --trees 500 --leaf 1   # レポートと同じ木 (ファイルが数 GB になる)
-    uv run train_imp_model.py --dataset 1013ver1     # 別の学習データ → models/imp_1013ver1.joblib
+    uv run train_imp_model.py --dataset 1111         # 別の学習データ → models/imp_1111.joblib
 
-データと前処理は ../2026_motion_to_meander_imp の report_20261111_dataset1111 (1013ver1 は report_20261013_dataset1013ver1。手法は
-同じ) と同じものを、あちらのコード (src/report0923_common.py) をそのまま呼んで作る:
-  1111_1547_kajihara_@13.56MHz.csv、左右チャネルの入れ替え補正 (1013ver1・1111 とも逆だった)、despike、
-  急変フレーム (|dZ/dt| の p99 超) の除外。
+データと前処理は ../2026_motion_to_meander_imp の report_20261118_dataset1118 (1111 は report_20261111_dataset1111、
+1013ver1 は report_20261013_dataset1013ver1。手法は同じ) と同じものを、あちらのコード (src/report0923_common.py) をそのまま呼んで作る:
+  1118_1449_kajihara_@13.56MHz.csv、左右チャネルの入れ替え補正 (1013ver1・1111 は逆だった。1118 は入れ替え不要)、despike、
+  急変フレーム (|dZ/dt| の p99 超) の除外、マーカー欠落・取り違えのフレームの除外 (marker_qc。1118 だけ有効。
+  時刻の飛び・骨格長の伸び・速度の跳びとその前後 0.5 s。ET の学習から外し、Ridge の窓 (過去 8 点〜h 秒先) にもかからないようにする)。
 違うのは 3 点:
   * 運用のモデルなので、ブロック分割で test に取っておかず**全フレームで学習する** (--eval のときだけ分割する)
   * 先読みの「過去 8 点」「h 秒先」を時刻で数える (imp_phase_model.py の docstring)
@@ -43,6 +44,7 @@ SEED = 0
 REPORT_RMSE = {
     "1013ver1": "L_Z_X 現在 1.49 / 0.1 s 先 1.74 / 0.2 s 先 2.36、R_Z_X 2.44 / 2.62 / 3.10",
     "1111": "L_Z_X 現在 0.95 / 0.1 s 先 1.23 / 0.2 s 先 2.03、R_Z_X 1.22 / 1.40 / 2.02",
+    "1118": "L_Z_X 現在 1.74 / 0.1 s 先 1.99 / 0.2 s 先 2.67、R_Z_X 1.11 / 1.47 / 2.31",
 }
 
 
@@ -61,10 +63,14 @@ def load(dataset: str):
             ref = build_features(s.df, side=side)[0]
             got = M.side_features(P, side)
             assert np.allclose(got, ref, atol=1e-5, equal_nan=True), f"{side} の 6 特徴量がレポートと違う"
-        vis = ~np.isnan(P).any(axis=1)
+        # marker_qc (1118 から) で外したフレームは、隠れたフレームと同じ扱い: ET の学習に使わず、
+        # Ridge の補間にも使わない (除外は前後 0.5 s ずつ広げてあるので、窓にかかると spans_ok で落ちる)
+        bad = getattr(s, "bad", np.zeros(s.n, bool))
+        vis = ~np.isnan(P).any(axis=1) & ~bad
         ok = steady_mask(s.y, s.t, thresh=thresh) & vis
         out.append(dict(name=s.name, t=s.t, P=P, y=s.y, vis=vis, ok=ok))
-        print(f"  [{s.name}] {s.n} フレーム、学習に使う {ok.sum()} (急変 {thresh:.0f} Ω/s 超・隠れを除外)")
+        print(f"  [{s.name}] {s.n} フレーム、学習に使う {ok.sum()} (急変 {thresh:.0f} Ω/s 超・隠れ"
+              + (f"・marker_qc {bad.sum()}" if bad.any() else "") + " を除外)")
     return out, thresh
 
 
