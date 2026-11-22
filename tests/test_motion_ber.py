@@ -438,6 +438,80 @@ def test_imp_phase_model():
     assert M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1)) is None
 
 
+def test_imp_phase_model_8marker():
+    """8 マーカー (rpy_same4): 角度の定義、折り返し、予測した姿勢、1121 の一部を Motive の並びで流したときの推定。"""
+    import imp_phase_model as M
+    # 角度: 左右の腕を真横に水平に伸ばす → ピッチ 0・ヨー 0。前に出すとヨー +90。真下でピッチ −90
+    P = np.zeros((1, 24))
+    def put(name, v):
+        k = M.MARKERS8.index(name) * 3
+        P[0, k:k + 3] = v
+    put("L_side", [-0.15, 0, 1.0]); put("R_side", [0.15, 0, 1.0])
+    for s, x in (("L", -1), ("R", 1)):                 # 体幹の座標: x = 右、y = 前 (ey = ez × ex)
+        put(f"{s}_upperarm", [0.2 * x, 0, 1.4]); put(f"{s}_joint", [0.5 * x, 0, 1.4]); put(f"{s}_forearm", [0.5 * x, 0.3, 1.4])
+    for s in "LR":
+        a = M.rpy_side(P, s)[0]
+        assert np.allclose(a, [0, 0, 0, 90], atol=1e-6), (s, a)
+        # 予測した姿勢: いまの角度をそのまま入れると、いまの姿勢に戻る
+    assert np.allclose(M.pose_from_rpy(P, {s: M.rpy_side(P, s) for s in "LR"}), P, atol=1e-9)
+    # ヨーの折り返し: 179° → −179° は +2° の変化
+    A = np.zeros((1, M.TAPS, 4))
+    A[0, :, 1] = 179.0
+    A[0, -1, 1] = -179.0
+    X, cur = M.rpy_ar_design(A)
+    assert np.allclose(X.reshape(M.TAPS - 1, 4)[:, 1], -2.0)
+
+    path = M.MODEL_PATH
+    csv_path = mb.HERE.parent / "2026_motion_to_meander_imp" / "1121_2101_kajihara_@13.56MHz.csv"
+    if not path.exists() or not csv_path.exists():
+        print("  (8 マーカーのモデルか 1121 の CSV が無いので、推定は確かめない)")
+        return
+    B = M.load_bundle(path)
+    if M.kind_of(B) != "rpy_same4":
+        print(f"  ({path.name} は 8 マーカーのモデルではないので、推定は確かめない)")
+        return
+    rows = list(csv.DictReader(open(csv_path, encoding="utf-8")))[3000:3100]
+    names = motion.MARKER_GROUPS["upper_side"]["names"]                       # Motive の配信順 (MARKERS8 とは違う)
+    assert sorted(names) == sorted(M.MARKERS8)
+    ts = np.array([float(r["Timestamp"]) for r in rows])
+    xyz = np.array([[[float(r[f"{n}_{a}"]) for a in "XYZ"] for n in names] for r in rows])
+    sel = (ts > ts[40] - 0.3) & (ts <= ts[40])
+    out = M.predict_phase(dict(names=names, history=(ts[sel], xyz[sel]), horizon=0.1))
+    assert out is not None and 90 <= out["phase"] <= 270
+    k = int(np.searchsorted(ts, ts[40] + 0.1))
+    real = [float(rows[k][c]) for c in ("leftbody_Z_R_13.56", "leftbody_Z_X_13.56",
+                                        "rightbody_Z_R_13.56", "rightbody_Z_X_13.56")]
+    assert all(abs(out[n] - v) < 10 for n, v in zip(M.TARGETS, real)), (out, real)
+    assert np.isfinite(out["_pose"]).all() and out["_pose"].shape == (8, 3)
+    # コイルごとに独立: 右腕を動かしても左コイルの推定は変わらない
+    xyz2 = xyz.copy()
+    xyz2[:, names.index("R_forearm"), 2] += 0.2
+    out2 = M.predict_phase(dict(names=names, history=(ts[sel], xyz2[sel]), horizon=0.1))
+    assert out2["L_Z_R"] == out["L_Z_R"] and out2["L_Z_X"] == out["L_Z_X"] and out2["R_Z_X"] != out["R_Z_X"]
+    # 全フレームまとめての予測は、ライブの 1 回ずつの予測と同じ値
+    fs = M.forecast_series(ts, xyz, names, 0.1)
+    k = int(np.searchsorted(ts, ts[40] + 0.1))
+    w = (ts > ts[k] - 0.1 - 0.3) & (ts <= ts[k] - 0.1)
+    one = M.predict_phase(dict(names=names, history=(ts[w], xyz[w]), horizon=0.1))
+    assert fs["ok"][k] and abs(fs["phase_pred"][k] - one["phase_actual"]) < 0.5, (fs["phase_pred"][k], one["phase_actual"])
+    assert np.isfinite(fs["phase_act"]).all() and phase_ok(M, names, xyz[40])
+    # 7 マーカーの名前を渡すと、7 マーカーのモデル (あれば) に切り替わる。無ければ計測部位の案内を出す
+    names7 = motion.MARKER_GROUPS["upper"]["names"]
+    if M.FALLBACK_MODEL_PATH.exists():
+        assert M.markers_of(M.pick_bundle(names7)) == M.MARKERS
+    else:
+        try:
+            M.pick_bundle(names7)
+            raise AssertionError("7 マーカーで 8 マーカーのモデルが通った")
+        except ValueError as e:
+            assert "upper_side" in str(e)
+
+
+def phase_ok(M, names, pose) -> bool:
+    ph = M.phase_for_pose(names, pose)
+    return ph is not None and 90 <= ph <= 270
+
+
 def test_http():
     mb.MOTION.close()
     mb.MOTION.buf.clear()

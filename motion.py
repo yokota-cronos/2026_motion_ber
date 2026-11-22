@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""motion.py -- OptiTrack (Motive / NatNet) からラベル付きマーカー 7 点の座標を受け続ける。
+"""motion.py -- OptiTrack (Motive / NatNet) からラベル付きマーカー 7 点 (8 点) の座標を受け続ける。
 
 nanoVNA_OptiTrack_get_dataset/sync_optitrack_nanovna.py の NatNet 受信とラベル認識だけを
 抜き出したもの。あちらは tkinter・pyserial・scikit-rf を import するので、BER 側の環境
@@ -32,7 +32,7 @@ HERE = Path(__file__).resolve().parent
 NATNET_DIR = Path(os.environ.get(
     "NATNET_DIR", HERE.parent / "nanoVNA_OptiTrack_get_dataset" / "NatNetSDK" / "Samples" / "PythonClient"))
 
-# sync_optitrack_nanovna.py の MARKER_GROUPS と同じ。names は Motive の配信順 (= marker_id 1..7)。
+# sync_optitrack_nanovna.py の MARKER_GROUPS と同じ。names は Motive の配信順 (= marker_id 1..7、upper_side は 1..8)。
 MARKER_GROUPS = {
     "upper": {"label": "上半身",
               # 2026-11-11 に左右を直した (アセット 0728_1233_7points_back の marker_id 2/4/5 が本人の左腕、
@@ -41,10 +41,16 @@ MARKER_GROUPS = {
               "names": ["chest", "L_upperarm", "R_upperarm", "L_joint", "L_forearm", "R_forearm", "R_joint"]},
     "lower": {"label": "下半身",
               "names": ["waist", "L_shin", "L_thigh", "R_thigh", "L_knee", "R_knee", "R_shin"]},
+    # 8 点: chest の代わりに左右の腰のあたり (胴体の側面) に R_side / L_side。腕は "upper" と同じ 6 点。
+    # 並びは sync_optitrack_nanovna.py の "upper_side" と同じ (2026-11-20 に実配信の座標から確定)。
+    # 1120・1121 の学習データはこの配置 (imp_phase_model の rpy_same4 のモデルはこれを使う)
+    "upper_side": {"label": "上半身・side (8 点)",
+                   "names": ["R_side", "L_upperarm", "R_upperarm", "R_joint", "L_joint", "L_side", "L_forearm", "R_forearm"]},
 }
 # 3D 表示: live_dashboard.py の MARKER_STYLE / BODY_LAYOUTS と同じ配色・ボーン・角度 (右 = 赤系、左 = 青系)
 MARKER_COLORS = {
     "R_upperarm": "red", "R_joint": "darkorange", "R_forearm": "firebrick", "chest": "dimgray",
+    "R_side": "rosybrown", "L_side": "slategray",
     "L_upperarm": "blue", "L_joint": "deepskyblue", "L_forearm": "navy",
     "R_thigh": "red", "R_knee": "darkorange", "R_shin": "firebrick", "waist": "dimgray",
     "L_thigh": "blue", "L_knee": "deepskyblue", "L_shin": "navy",
@@ -55,6 +61,12 @@ BODY_LAYOUTS = {
                          ("L_upperarm", "L_joint", "blue"), ("L_joint", "L_forearm", "blue")],
                   angles=[("右肘", ("R_upperarm", "R_joint", "R_forearm"), "crimson"),
                           ("左肘", ("L_upperarm", "L_joint", "L_forearm"), "royalblue")]),
+    "upper_side": dict(bones=[("L_side", "R_side", "gray"), ("R_side", "R_upperarm", "gray"),
+                              ("R_upperarm", "R_joint", "red"), ("R_joint", "R_forearm", "red"),
+                              ("L_side", "L_upperarm", "gray"), ("L_upperarm", "L_joint", "blue"),
+                              ("L_joint", "L_forearm", "blue")],
+                       angles=[("右肘", ("R_upperarm", "R_joint", "R_forearm"), "crimson"),
+                               ("左肘", ("L_upperarm", "L_joint", "L_forearm"), "royalblue")]),
     "lower": dict(bones=[("waist", "R_thigh", "gray"), ("R_thigh", "R_knee", "red"),
                          ("R_knee", "R_shin", "red"), ("waist", "L_thigh", "gray"),
                          ("L_thigh", "L_knee", "blue"), ("L_knee", "L_shin", "blue")],
@@ -209,13 +221,15 @@ class MotionStream:
         def run():
             k, t0 = 0, time.perf_counter()
             base = np.array([[0, 1.3, 0], [0.2, 1.4, 0], [-0.2, 1.4, 0], [0.35, 1.2, 0],
-                             [0.4, 1.0, 0], [-0.4, 1.0, 0], [-0.35, 1.2, 0]], float)
+                             [0.4, 1.0, 0], [-0.4, 1.0, 0], [-0.35, 1.2, 0], [0.1, 1.0, 0]], float)
+            n = len(self.names)                  # 7 点 (upper・lower) か 8 点 (upper_side)
+            base = base[:n]
             while not self._fake_stop.is_set():
                 k += 1
                 due = t0 + k / fps
                 time.sleep(max(0.0, due - time.perf_counter()))
                 w = 2 * math.pi * 0.5 * (due - t0)
-                xyz = base + 0.1 * np.sin(w + np.arange(7))[:, None] * np.array([1, 0.5, 1])
+                xyz = base + 0.1 * np.sin(w + np.arange(n))[:, None] * np.array([1, 0.5, 1])
                 if k % 400 < 20:
                     xyz[4] = np.nan                  # 時々 1 点隠す
                 self._ingest(time.perf_counter(), k, k / fps, None, xyz)

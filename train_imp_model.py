@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """train_imp_model.py -- imp_phase_model.py が使うモデル (Ridge AR + ExtraTrees) を学習して保存する。
 
-    uv run train_imp_model.py              # 1118 で学習 → models/imp_1118.joblib
-    uv run train_imp_model.py --eval       # 先に 20 ブロック分割で精度を出す (レポートの 4 節と比べる用)
+    uv run train_imp_model.py              # 1121 (8 マーカー) で学習 → models/imp_1121.joblib (既定、2026-11-22 から)
+    uv run train_imp_model.py --eval       # 先に精度を出す (8 マーカー: 2123 で学習 → 2101 でテスト。7 マーカー: 20 ブロック分割)
+    uv run train_imp_model.py --dataset 1118   # 7 マーカー (chest あり) → models/imp_1118.joblib (7 マーカーの記録・配信で自動で使う)
+
+8 マーカー (1120・1121。../2026_motion_to_meander_imp/src/report1120_run.py の DATASETS) は rpy_same4 のモデル:
+コイルごとに独立で、左コイルは左腕・右コイルは右腕の上腕・前腕のピッチ・ヨー 4 個だけを使う
+(report_20261122_imu_features.pdf の 7 章。前処理は report1120_run と同じ。本編と別収録の両方の全フレームで学習する)。
+以下は 7 マーカー (side6) の説明:
     uv run train_imp_model.py --trees 500 --leaf 1   # レポートと同じ木 (ファイルが数 GB になる)
     uv run train_imp_model.py --dataset 1111         # 別の学習データ → models/imp_1111.joblib
 
@@ -187,6 +193,144 @@ def evaluate(sessions, trees: int, leaf: int, dataset: str) -> None:
     print("  (位相° = 推定した Z から出した位相と、実測の Z から出した位相の差の RMSE)\n")
 
 
+# --------------------------------------------------------------------------- 8 マーカー (rpy_same4)
+def is_8marker(dataset: str) -> bool:
+    """report1120_run.DATASETS にある学習データ (1120・1121) は 8 マーカー → rpy_same4 のモデル。"""
+    sys.path.insert(0, str(IMP_DIR / "src"))
+    import report1120_run as R
+    return dataset in R.DATASETS
+
+
+def load8(dataset: str):
+    """8 マーカーの学習データを report1120_run と同じ前処理で読む (despike、marker_qc、急変ゲート)。
+
+    返す: sessions (dict のリスト。role = "main" (本編) か "external" (別収録))、急変のしきい値。
+    しきい値は report1120_run と同じく本編の |dZ/dt| の p99 (marker_qc で外したフレームを除く)。
+    """
+    sys.path.insert(0, str(IMP_DIR / "src"))
+    import report1120_run as R
+    import report1121_rpy as RP
+    from dataset import steady_mask
+
+    R.set_dataset(dataset)
+    assert tuple(R.MARKERS8) == M.MARKERS8, "report1120_run.MARKERS8 と imp_phase_model.MARKERS8 の並びが違う"
+    raw = [(R.Session(n, p), "main") for n, p in R.SESSIONS] + [(R.Session(n, p), "external") for n, p in R.EXTERNAL]
+    r = np.concatenate([s.rate()[~(s.bad[1:] | s.bad[:-1])] for s, role in raw if role == "main"])
+    thresh = float(np.percentile(r, 99))
+    out = []
+    for s, role in raw:
+        P = np.hstack([s.P[m] for m in M.MARKERS8])
+        ref, names, _ = RP.features(s.P)                       # レポートの特徴量と同じになっているか
+        for side in M.SIDES:
+            got = M.rpy_side(P, side)
+            want = ref[:, [names.index(f"{side}_{n}") for n in M.RPY_NAMES]]
+            fin = np.isfinite(want).all(axis=1)
+            assert np.allclose(got[fin], want[fin], atol=1e-6), f"{side} の 4 個がレポートと違う"
+        vis = ~np.isnan(P).any(axis=1) & ~s.bad
+        ok = steady_mask(s.y, s.t, thresh=thresh) & vis
+        out.append(dict(name=s.name, role=role, t=s.t, P=P, y=s.y, vis=vis, ok=ok))
+        print(f"  [{s.name}] ({role}) {s.n} フレーム、学習に使う {ok.sum()} (急変 {thresh:.0f} Ω/s 超・隠れ・marker_qc {s.bad.sum()} を除外)")
+    return out, thresh
+
+
+def ar_samples_rpy(sess: dict, h: float, idx: np.ndarray, side: str):
+    """rpy_same4 の Ridge の入力 (その側の 4 個の角度の過去 7 点の変位) と、h 秒先の角度の変化。
+
+    姿勢 (座標) を時刻で 0.02 s 刻みに補間してから角度にする (実行時の forecast_impedance と同じ順)。
+    返す: X、先の変化、いまの角度、使ったフレーム。
+    """
+    t, P = sess["t"][sess["vis"]], sess["P"][sess["vis"]]
+    now = sess["t"][idx]
+    keep = M.spans_ok(t, now - (M.TAPS - 1) * M.STEP, now + h)
+    now = now[keep]
+    Pq = M.resample(t, P, M.history_times(now).ravel()).reshape(len(now), M.TAPS, -1)
+    X, cur = M.rpy_ar_design(M.rpy_side(Pq, side))
+    fut = M.rpy_side(M.resample(t, P, now + h), side)
+    return X, M.rpy_target(fut, cur), cur, idx[keep]
+
+
+def fit_ridge_rpy(sessions, idx_by_sess, h: float, side: str):
+    """fit_ridge と同じ (標準化 + α を学習フレームの後ろ 1 割で選ぶ) を、その側の 4 個の角度で。"""
+    def stack(idxs):
+        parts = [ar_samples_rpy(s, h, i, side) for s, i in zip(sessions, idxs)]
+        return np.vstack([p[0] for p in parts]), np.vstack([p[1] for p in parts])
+
+    cut = [i[:int(len(i) * (1 - RIDGE_VAL))] for i in idx_by_sess]
+    val = [i[int(len(i) * (1 - RIDGE_VAL)):] for i in idx_by_sess]
+    Xf, Yf = stack(cut)
+    Xv, Yv = stack(val)
+    score = {a: float(np.mean((make_ridge(a).fit(Xf, Yf).predict(Xv) - Yv) ** 2 / Yv.var(axis=0)))
+             for a in RIDGE_ALPHAS}
+    alpha = min(score, key=score.get)
+    X, Y = stack(idx_by_sess)
+    return make_ridge(alpha).fit(X, Y), alpha, len(X)
+
+
+def fit_rpy(sessions, idx_by_sess, trees: int, leaf: int):
+    """左右のコイルそれぞれ、同じ側の腕の 4 個だけで ExtraTrees と Ridge AR を学習する。"""
+    from sklearn.ensemble import ExtraTreesRegressor
+
+    et = {}
+    for side, cols in M.SIDES.items():
+        X = np.vstack([M.rpy_side(s["P"][i], side) for s, i in zip(sessions, idx_by_sess)])
+        y = np.vstack([s["y"][i][:, list(cols)] for s, i in zip(sessions, idx_by_sess)])
+        t0 = time.perf_counter()
+        et[side] = ExtraTreesRegressor(n_estimators=trees, min_samples_leaf=leaf, random_state=SEED,
+                                         n_jobs=-1).fit(X, y)
+        print(f"  ExtraTrees {side} ({side} の腕の {', '.join(M.RPY_NAMES)}): {len(X)} フレーム、"
+              f"{time.perf_counter() - t0:.1f} s")
+    ridge, alphas = {}, {}
+    for h in M.HORIZON_GRID:
+        ridge[h], alphas[h] = {}, {}
+        for side in M.SIDES:
+            ridge[h][side], alphas[h][side], n = fit_ridge_rpy(sessions, idx_by_sess, h, side)
+    print(f"  Ridge AR {M.HORIZON_GRID[0]:.2f}〜{M.HORIZON_GRID[-1]:.2f} s 先 ({len(ridge)} × 2 本、角度、標準化 + α 選択): "
+          f"{n} サンプル ({M.HORIZON_GRID[-1]:.2f} s 先のとき)")
+    print("    選んだ α: " + "  ".join(f"{h:g} s→L {alphas[h]['L']:g} / R {alphas[h]['R']:g}" for h in M.HORIZONS))
+    return et, ridge, alphas
+
+
+def evaluate_rpy(sessions, trees: int, leaf: int) -> None:
+    """本編 (2123) の全フレームで学習 → 別収録 (2101) で評価 (report_20261122_imu_features の 7 章と同じ組み方)。"""
+    train = [s for s in sessions if s["role"] == "main"]
+    test = [s for s in sessions if s["role"] == "external"]
+    if not test:
+        print("  別収録が無いので評価しない")
+        return
+    et, ridge, _ = fit_rpy(train, [np.where(s["ok"])[0] for s in train], trees, leaf)
+    B = dict(kind="rpy_same4", markers=M.MARKERS8, et=et, ridge=ridge)
+    print(f"\n  {', '.join(s['name'] for s in test)} での精度 (レポート 7 章: ET 500 本・葉 1 で 100 ms 先の R² "
+          f"0.159 / 0.883 / 0.405 / 0.899、位相 5.32°)")
+    print("  " + "".join(f"{n:>16}" for n in ("", *M.TARGETS, "位相°")))
+    for h in (0.0, *M.HORIZONS):
+        zs, ys = [], []
+        for s in test:
+            i = np.where(s["ok"])[0]
+            if h == 0.0:
+                zs.append(np.hstack([et[sd].predict(M.rpy_side(s["P"][i], sd)) for sd in M.SIDES]))
+                ys.append(s["y"][i])
+                continue
+            z = np.empty((0, 4))
+            parts = {}
+            for sd in M.SIDES:
+                X, _, cur, k = ar_samples_rpy(s, h, i, sd)
+                a = cur + ridge[h][sd].predict(X)
+                a[:, M.RPY_CIRC] = M.wrap180(a[:, M.RPY_CIRC])
+                parts[sd] = (et[sd].predict(a), k)
+            k = parts["L"][1]
+            assert np.array_equal(k, parts["R"][1])
+            zs.append(np.hstack([parts["L"][0], parts["R"][0]]))
+            ys.append(np.vstack([np.interp(s["t"][k] + h, s["t"], s["y"][:, j]) for j in range(4)]).T)
+        z, y = np.vstack(zs), np.vstack(ys)
+        rmse = np.sqrt(np.mean((z - y) ** 2, axis=0))
+        r2 = 1 - np.sum((z - y) ** 2, axis=0) / np.sum((y - y.mean(0)) ** 2, axis=0)
+        ph = (np.array([M.phase_for_impedance(v) for v in z]) - np.array([M.phase_for_impedance(v) for v in y]) + 180) % 360 - 180
+        label = "現在" if h == 0.0 else f"{h:g} s 先"
+        print("  " + f"{label:>15} " + "".join(f"{f'{e:.2f}Ω R²{q:.3f}':>16}" for e, q in zip(rmse, r2))
+              + f"{np.sqrt(np.mean(ph ** 2)):16.2f}")
+    print()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", default=DATASET, help=f"report0923_common.DATASETS のキー (既定 {DATASET})")
@@ -199,6 +343,23 @@ def main() -> int:
         a.out = M.MODEL_PATH if a.dataset == DATASET else HERE / "models" / f"imp_{a.dataset}.joblib"
 
     print(f"データセット {a.dataset} を読む ({IMP_DIR})")
+    if is_8marker(a.dataset):
+        sessions, thresh = load8(a.dataset)
+        if a.eval:
+            print("\n評価 (本編で学習 → 別収録でテスト)")
+            evaluate_rpy(sessions, a.trees, a.leaf)
+        print("全フレーム (本編 + 別収録) で学習")
+        et, ridge, alphas = fit_rpy(sessions, [np.where(s["ok"])[0] for s in sessions], a.trees, a.leaf)
+        import joblib
+        a.out.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(dict(
+            dataset=a.dataset, sessions=[s["name"] for s in sessions], trained=datetime.now().isoformat(timespec="seconds"),
+            steady_thresh=thresh, trees=a.trees, leaf=a.leaf, kind="rpy_same4", markers=M.MARKERS8,
+            features=M.RPY_NAMES, targets=M.TARGETS, taps=M.TAPS, step=M.STEP,
+            et=et, ridge=ridge, ridge_alpha=alphas, ridge_scaled=True, ridge_input="rpy_same4",
+        ), a.out)
+        print(f"  -> {a.out} ({a.out.stat().st_size / 1e6:.0f} MB)")
+        return 0
     sessions, thresh = load(a.dataset)
     if a.eval:
         print("\n評価 (20 ブロック分割)")
