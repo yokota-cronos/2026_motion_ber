@@ -64,6 +64,23 @@ HORIZON_GRID = tuple(round(0.02 + 0.01 * i, 2) for i in range(29))
 PHASE_SETTLE_S = 0.005                    # 自動調整で位相を変えてから収録を始めるまで待つ時間 [s] (README「約 5 ms で移る」)
 REF_WARMUP = 5                            # 基準のモデルの位相 = 最初のこの回数の中央値。その間は位相を変えない
 CAPTURE_SECONDS = 0.095                  # 既定の収録窓 [s]。位相の 5 ms と合わせて 100 ms
+# 補正量の試験 (画面の「試験: 補正にオフセットを足す」、--offset-test): 自動補正した位相に、収録ごとにこのどれかを足す。
+# 7 回で 1 巡 (順番は巡ごとに並べ替える。腕振りの周期と同期しないように)。姿勢ごとに BER・peak が最小になる
+# オフセット = モデルの補正量のずれ (analyze_offset_test.py)。基準を取る間は足さない
+TEST_OFFSETS = (-12.0, -8.0, -4.0, 0.0, 4.0, 8.0, 12.0)
+# 補正のゲイン (画面の「補正のゲイン」、--gain): 送る位相 = 初期位相 + GAIN × (モデルの位相 − 基準)。
+# 2026-11-20 14:24 の補正量の試験 (タグは左腕側、1118 のモデル) では、打ち消しが最も深くなる補正 ≈ 0.62 × モデルの補正
+# (学習データの VNA 測定は今と別のコネクタ)。既定は 1 (モデルのまま)。範囲は GAIN_RANGE
+DEFAULT_GAIN = 1.0
+GAIN_RANGE = (0.0, 2.0)
+
+
+def parse_gain(v) -> float:
+    """画面・コマンドラインの補正のゲイン → float (GAIN_RANGE の中、0.01 刻み)。"""
+    g = round(float(v), 2)
+    if not GAIN_RANGE[0] <= g <= GAIN_RANGE[1]:
+        raise ValueError(f"補正のゲインは {GAIN_RANGE[0]:g}〜{GAIN_RANGE[1]:g}")
+    return g
 
 
 def parse_horizon(v) -> float:

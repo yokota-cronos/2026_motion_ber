@@ -147,6 +147,78 @@ def test_auto_phase_hook(tmp_path=None):
         mb.bg.COMMANDS.clear()
 
 
+def test_offset_test(tmp_path=None):
+    """補正量の試験: 基準を取った後の収録ごとに TEST_OFFSETS を 1 巡ずつ (並べ替えて) 足し、phase_pred.csv の
+    test_offset に残す (phase = 初期位相 + delta + test_offset)。基準を取る間は足さない。"""
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    n_off = len(mb.phase_control.TEST_OFFSETS)
+    vals = iter([200.0, 200.0] + [205.0] * (2 * n_off))
+    warm0, mb.phase_control.REF_WARMUP = mb.phase_control.REF_WARMUP, 2
+    mb.PHASE_MODEL = NS(predict_phase=lambda m: next(vals))
+    mb.OPTS.update(auto_phase=True, offset_test=True)
+    mb._TEST_SEQ.clear()
+    mb.bg.STATE.live["phase_deg"] = 180.0
+    try:
+        log = _session(tmp)
+        got = [log.phase_before_capture(k) for k in range(1, 3 + 2 * n_off)]
+        assert got[:2] == [180.0, 180.0]                      # 基準を取る間はオフセットなし
+        offs = [round(v - 185.0, 2) for v in got[2:]]          # 初期 180 + 補正 +5 + オフセット
+        assert sorted(offs[:n_off]) == sorted(mb.phase_control.TEST_OFFSETS) == sorted(offs[n_off:])
+        assert mb.REF["base"] == 180.0                         # オフセットを足しても「手で変えた」扱いにならない
+        log.close()
+        rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
+        assert [float(r["test_offset"]) for r in rows] == [0.0, 0.0] + offs
+        assert all(abs(float(r["phase"]) - (float(r["base"]) + float(r["delta"]) + float(r["test_offset"]))) < 0.01
+                   for r in rows[2:])
+        mc = json.loads((log.dir / "motion_conditions.json").read_text(encoding="utf-8"))
+        assert mc["test_offsets"] == list(mb.phase_control.TEST_OFFSETS)
+    finally:
+        mb.phase_control.REF_WARMUP = warm0
+        mb.PHASE_MODEL = None
+        mb.OPTS.update(auto_phase=False, offset_test=False)
+        mb.bg.STATE.live["phase_deg"] = 180.0
+
+
+def test_gain(tmp_path=None):
+    """補正のゲイン: 送る位相 = 初期位相 + gain × (モデルの位相 − 基準)。phase_pred.csv に gain、画面の delta は掛けた後。"""
+    tmp = Path(tmp_path or tempfile.mkdtemp())
+    mb.MOTION.close()
+    mb.MOTION.buf.clear()
+    vals = iter([200.0, 210.0, 190.0])
+    warm0, mb.phase_control.REF_WARMUP = mb.phase_control.REF_WARMUP, 1
+    mb.PHASE_MODEL = NS(predict_phase=lambda m: next(vals))
+    mb.OPTS.update(auto_phase=True, gain=mb.phase_control.parse_gain(0.6))
+    name0, mb.PHASE_MODEL_NAME = mb.PHASE_MODEL_NAME, "test_model.py"
+    mb.bg.STATE.live["phase_deg"] = 180.0
+    try:
+        log = _session(tmp)
+        got = []
+        for k in range(1, 4):
+            got.append(log.phase_before_capture(k))
+            log.row(dict(t=0, level=0.0, phase=got[-1], frames=0, expected=0, bits=0, errors=0, q=None, eye=None),
+                    cap=_cap_dict(time.perf_counter(), "auto"))
+        assert got == [180.0, 186.0, 174.0], got                # +10 × 0.6、−10 × 0.6
+        assert mb.CORR[-1]["delta"] == -6.0 and mb.CORR[-1]["delta_model"] == -10.0 and mb.CORR[-1]["gain"] == 0.6
+        log.close()
+        rows = list(csv.DictReader(open(log.dir / "phase_pred.csv", encoding="utf-8")))
+        assert [float(r["gain"]) for r in rows] == [0.6] * 3
+        assert json.loads((log.dir / "motion_conditions.json").read_text(encoding="utf-8"))["gain"] == 0.6
+        for bad in (-0.1, 2.5):
+            try:
+                mb.phase_control.parse_gain(bad)
+                raise AssertionError(bad)
+            except ValueError:
+                pass
+    finally:
+        mb.phase_control.REF_WARMUP = warm0
+        mb.PHASE_MODEL = None
+        mb.OPTS.update(auto_phase=False, gain=mb.phase_control.DEFAULT_GAIN)
+        mb.PHASE_MODEL_NAME = name0
+        mb.bg.STATE.live["phase_deg"] = 180.0
+
+
 def test_auto_phase_history_and_info(tmp_path=None):
     """先読みするモデル用の history / 固定の horizon と、dict を返したときの phase_pred.csv (cap = その位相で撮った収録)。"""
     tmp = Path(tmp_path or tempfile.mkdtemp())

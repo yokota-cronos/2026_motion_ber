@@ -72,8 +72,19 @@ _RAW_CACHE: dict = {}                     # .ad3 のパス -> 復調の材料 (�
 CAMERA = camera.Camera()
 CAPTURE: dict = {}            # 直近の収録: t0 [perf], n, fs, rx_fs, res。収録スレッドが t0 を、処理スレッドが res を書く
 OPTS = dict(require_motion=True, auto_phase=False, record_video=True, horizon=phase_control.HORIZONS[0],
-            swap_lr=False)       # swap_lr: Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ R_* ↔ L_* にする
+            swap_lr=False,       # swap_lr: Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ R_* ↔ L_* にする
+            offset_test=False,   # 補正量の試験: 自動補正に phase_control.TEST_OFFSETS を収録ごとに足す
+            gain=phase_control.DEFAULT_GAIN)   # 補正のゲイン: 送る位相 = 初期位相 + gain × (モデルの位相 − 基準)
 PHASE_MODEL = None
+_TEST_SEQ: list = []          # 補正量の試験で、この巡にまだ使っていないオフセット
+_TEST_RNG = np.random.default_rng()
+
+
+def next_test_offset() -> float:
+    """TEST_OFFSETS を 1 巡ずつ並べ替えて 1 つずつ返す (どのオフセットも同じ回数になる)。"""
+    if not _TEST_SEQ:
+        _TEST_SEQ.extend(_TEST_RNG.permutation(phase_control.TEST_OFFSETS).tolist())
+    return float(_TEST_SEQ.pop())
 PHASE_MODEL_NAME = ""
 LAST: dict = {}               # 画面に出す直近の収録窓のモーション
 # 画面の「補正の状況」: 収録 1 回 = 1 件 (BER とその収録で使った位相・補正量・先読みの実測)。記録ごとに空にする
@@ -214,6 +225,10 @@ class MotionSessionLog(bg.SessionLog):
             motion_time="NatNet のフレームを受けた時刻。Motive の処理・配信の遅れ (数 ms) は未較正",
             phase_model=PHASE_MODEL_NAME or None,
             phase_model_swap_lr=OPTS["swap_lr"] if PHASE_MODEL_NAME else None,   # 開始時。途中の切り替えは phase_pred.csv の swap_lr
+            # 補正量の試験 (開始時)。各収録で足した値は phase_pred.csv の test_offset (phase = base + gain × delta + test_offset)
+            offset_test=OPTS["offset_test"] if PHASE_MODEL_NAME else None,
+            test_offsets=list(phase_control.TEST_OFFSETS),
+            gain=OPTS["gain"] if PHASE_MODEL_NAME else None,      # 開始時。各収録の値は phase_pred.csv の gain
         ), ensure_ascii=False, indent=2), encoding="utf-8")
 
         xyz = [f"{n}_{a}" for n in self.names for a in "XYZ"]
@@ -298,8 +313,10 @@ class MotionSessionLog(bg.SessionLog):
         entry = dict(
             cap=self.n_cap, t=round(t0 - self.perf0, 3), errors=int(p["errors"]), bits=int(p["bits"]),
             frames=int(p["frames"]), expected=int(p["expected"]), phase=p.get("phase"), src="auto" if auto else "manual",
-            valid=round(valid, 3), delta=pr.get("delta"), base=pr.get("base"), ref=pr.get("ref"),
-            warmup=pr.get("warmup"), n_warm=pr.get("n_warm"), horizon=pr.get("horizon"),
+            # delta = 実際に入れた補正 (ゲインを掛けた後、試験のオフセットは含まない)。delta_model = モデルの補正量
+            valid=round(valid, 3), delta=None if pr.get("delta") is None else round(pr["delta"] * pr.get("gain", 1.0), 3),
+            delta_model=pr.get("delta"), gain=pr.get("gain"), base=pr.get("base"), ref=pr.get("ref"),
+            warmup=pr.get("warmup"), n_warm=pr.get("n_warm"), horizon=pr.get("horizon"), test_offset=pr.get("test_offset"),
             # 先読みの実測: 最後のモーションのフレーム → この収録窓の中央 [ms]
             lead_ms=None if pr.get("t_motion") is None else round(((t0 + t1) / 2 - self.perf0 - pr["t_motion"]) * 1e3, 1))
         with CORR_LOCK:
@@ -346,12 +363,15 @@ class MotionSessionLog(bg.SessionLog):
         # 記録全体がずれる。2026-11-18 18:26 の記録で、最初の 1 回が 144° (ふだん約 172°) → 全体が +28° ずれた)。
         # その間は位相を初期位相のまま変えない
         warming = len(REF["warm"]) < phase_control.REF_WARMUP
+        off = 0.0                                            # 補正量の試験で足したオフセット [°]
         if warming:
             REF["warm"].append(p)
             REF["ref"] = float(np.median(REF["warm"]))
             v = REF["base"]
         else:
-            v = phase_control.clamp(REF["base"] + p - REF["ref"])
+            if OPTS["offset_test"]:
+                off = next_test_offset()
+            v = phase_control.clamp(REF["base"] + OPTS["gain"] * (p - REF["ref"]) + off)
         sent = v is not None and abs(v - cur) >= 0.01
         if v is not None:
             with bg.STATE.lock:
@@ -359,7 +379,7 @@ class MotionSessionLog(bg.SessionLog):
             REF["last"] = v
             LAST["auto_phase"] = v
         row = dict(phase_model=p, base=REF["base"], ref=round(REF["ref"], 3), warmup=int(warming),
-                   delta=round(p - REF["ref"], 3), swap_lr=int(OPTS["swap_lr"]),
+                   delta=round(p - REF["ref"], 3), gain=OPTS["gain"], test_offset=off, swap_lr=int(OPTS["swap_lr"]),
                    t_motion=round(hist[-1].t - self.perf0, 6) if hist else None,
                    t_decided=round(time.perf_counter() - self.perf0, 6))
         LAST["pred"] = dict(info or {}, **row, horizon=h, phase=v)
@@ -626,6 +646,8 @@ PANEL = """
       <label title="モデルに渡す先読み (固定)。収録の直前に予測して位相を変えるので、最後のモーションから収録窓の中央までの時間に合わせる (95 ms の窓で約 100 ms)">先読み<select id="mHor">""" + "".join(
     f'<option value="{h:g}">{h * 1000:.0f} ms 先</option>' for h in phase_control.HORIZONS) + """</select></label>
       <label class="chk" title="Motive のラベルが左右逆 (R_* が本人の左腕) のとき入れる。位相のモデルに渡す名前だけ入れ替える。記録の CSV はラベルのまま (後で fix_lr.py で直す)"><input id="mSwap" type="checkbox">マーカーの左右が逆</label>
+      <label class="chk" id="mOffTL" title="補正量の試験。自動補正した位相に、収録ごとに """ + " / ".join(f"{o:+g}" for o in phase_control.TEST_OFFSETS) + """° のどれかを順に (巡ごとに並べ替えて) 足す。姿勢ごとに BER が最小になるオフセット = モデルの補正量のずれ。ふだんの測定では切っておく"><input id="mOffT" type="checkbox">試験: 補正にオフセットを足す</label>
+      <label id="mGainL" title="送る位相 = 初期位相 + ゲイン × モデルの補正量。1 = モデルのまま。2026-11-20 の補正量の試験では約 0.6 で打ち消しが最も深かった (学習データとコネクタが違うため)">補正のゲイン<input id="mGain" type="number" min="0" max="2" step="0.05" style="width:4.5em"></label>
     </div>
     <div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:4px 18px;align-items:center;font-size:13px">
       <span><span id="mDot" style="width:10px;height:10px;border-radius:50%;background:#888;display:inline-block;margin-right:6px"></span><b id="mText">未接続</b></span>
@@ -686,7 +708,7 @@ PANEL = """
   </section>
   <div class="pair" id="mViews">
     <section class="card">
-      <h2>マーカーの 3D 表示<small>ドラッグで回転、ホイールで拡大縮小、ダブルクリックで戻す</small><span style="float:right;display:inline-flex;gap:14px;font-weight:400"><label class="chk" title="ライブ: 直近の収録の位相を決めるのに使った予測 (破線) と、その収録窓の実際の姿勢 (灰色、平均)。記録の再生: その時刻の、先読みの時間だけ前までのモーションから Ridge で予測した姿勢 (破線) を実際の姿勢に重ねる"><input type="checkbox" id="mPred">予測を重ねる</label><label class="chk" title="記録の再生のときだけ。連続 = その時刻の、先読みの時間だけ前までのモーションから予測した姿勢。補正に使った予測 = 収録窓の中だけ、その収録の位相を決めた予測 (と、その窓の実際の姿勢)">表示<select id="mPredMode" disabled><option value="both" selected>両方（収録中は補正に使った予測）</option><option value="cont">連続の予測だけ</option><option value="used">補正に使った予測だけ</option></select></label><label class="chk" title="記録の再生のときだけ選べる (ライブは位相の自動調整の先読みのまま)">先読み<select id="mPredH" disabled>""" + "".join(f'<option value="{h:g}"{" selected" if h == phase_control.HORIZONS[0] else ""}>{h * 1000:.0f} ms</option>' for h in (0.05, 0.1, 0.15, 0.2, 0.3)) + """</select></label><button id="mCamView" style="padding:2px 10px;font-weight:400" title="動画のカメラと同じ向き (本人の正面) から見る。ダブルクリックでも戻る">カメラの向き</button><label class="chk" style="font-weight:400" title="Motive の設定 (Up Axis) に合わせる。この台では Z が上">上の軸<select id="mUp"><option value="z" selected>Z</option><option value="y">Y</option></select></label></span></h2>
+      <h2>マーカーの 3D 表示<small>ドラッグで回転、ホイールで拡大縮小、ダブルクリックで戻す</small><span style="float:right;display:inline-flex;flex-wrap:wrap;justify-content:flex-end;max-width:100%;gap:4px 14px;font-weight:400"><label class="chk" title="ライブ: 直近の収録の位相を決めるのに使った予測 (破線) と、その収録窓の実際の姿勢 (灰色、平均)。記録の再生: その時刻の、先読みの時間だけ前までのモーションから Ridge で予測した姿勢 (破線) を実際の姿勢に重ねる"><input type="checkbox" id="mPred">予測を重ねる</label><label class="chk" title="記録の再生のときだけ。連続 = その時刻の、先読みの時間だけ前までのモーションから予測した姿勢。補正に使った予測 = 収録窓の中だけ、その収録の位相を決めた予測 (と、その窓の実際の姿勢)">表示<select id="mPredMode" disabled><option value="both" selected>両方（収録中は補正に使った予測）</option><option value="cont">連続の予測だけ</option><option value="used">補正に使った予測だけ</option></select></label><label class="chk" title="記録の再生のときだけ選べる (ライブは位相の自動調整の先読みのまま)">先読み<select id="mPredH" disabled>""" + "".join(f'<option value="{h:g}"{" selected" if h == phase_control.HORIZONS[0] else ""}>{h * 1000:.0f} ms</option>' for h in (0.05, 0.1, 0.15, 0.2, 0.3)) + """</select></label><button id="mCamView" style="padding:2px 10px;font-weight:400" title="動画のカメラと同じ向き (本人の正面) から見る。ダブルクリックでも戻る">カメラの向き</button><label class="chk" style="font-weight:400" title="Motive の設定 (Up Axis) に合わせる。この台では Z が上">上の軸<select id="mUp"><option value="z" selected>Z</option><option value="y">Y</option></select></label></span></h2>
       <canvas id="m3d" data-h="360" data-fixed="1" style="height:360px;cursor:grab;touch-action:none"></canvas>
       <div id="mPredInfo" class="note" style="min-height:0;line-height:1.6"></div>
     </section>
@@ -729,6 +751,11 @@ PANEL_JS = """
       if (document.activeElement !== val("mHor")) val("mHor").value = String(s.horizon);
       val("mHor").disabled = !s.model;
       val("mSwap").checked = s.swap_lr; val("mSwap").disabled = !s.model;
+      val("mOffT").checked = s.offset_test; val("mOffT").disabled = !s.model;
+      val("mOffTL").style.color = s.offset_test ? "#d62728" : "";
+      if (document.activeElement !== val("mGain")) val("mGain").value = String(s.gain);
+      val("mGain").disabled = !s.model;
+      val("mGainL").style.color = s.gain !== 1 ? "#1f77b4" : "";
       const src = { natnet: "OptiTrack", fake: "合成", "": "" }[s.source];
       val("mDot").style.background = s.receiving ? "#2ca02c" : (s.source ? "#f28e2b" : "#888");
       val("mText").textContent = !s.source ? "未接続" : s.receiving
@@ -744,7 +771,9 @@ PANEL_JS = """
       const P = L && L.pred, z = (r, x) => `${r.toFixed(1)}${x < 0 ? "−" : "+"}j${Math.abs(x).toFixed(1)}`;
       if (P && P.L_Z_R != null) val("mLast").textContent += `　推定 Z（${Math.round(P.horizon * 1000)} ms 先）: 左 ${z(P.L_Z_R, P.L_Z_X)} Ω・右 ${z(P.R_Z_R, P.R_Z_X)} Ω`;
       if (P && P.base != null && P.warmup) val("mLast").textContent += `　基準を取っています（初期 ${P.base}° のまま）`;
-      else if (P && P.base != null) val("mLast").textContent += `　初期 ${P.base}° ${P.delta < 0 ? "−" : "+"} 補正 ${Math.abs(P.delta).toFixed(2)}° → ` +
+      else if (P && P.base != null) val("mLast").textContent += `　初期 ${P.base}° ${P.delta < 0 ? "−" : "+"} 補正 ${Math.abs(P.delta * (P.gain ?? 1)).toFixed(2)}°` +
+        (P.gain != null && P.gain !== 1 ? `（モデル ${P.delta.toFixed(2)}° × ゲイン ${P.gain}）` : "") +
+        (P.test_offset ? ` ${P.test_offset < 0 ? "−" : "+"} 試験 ${Math.abs(P.test_offset)}°` : "") + ` → ` +
         (P.phase != null ? `指定 ${P.phase}°` : "90〜270° の外なので変えない");
       const c = s.camera;
       val("mErr").textContent = [s.error, c.error].filter(Boolean).join("　");
@@ -794,7 +823,7 @@ PANEL_JS = """
     set("ctBer10", berTxt(e10, b10), dotHtml(r10 && r10.v) + `誤り ${e10.toLocaleString()} / ${(b10 / 1e6).toFixed(2)} M ビット`);
     set("ctPh", L.phase != null ? `${L.phase.toFixed(2)}°` : "—", stateOf(L));
     set("ctDel", L.delta == null || L.warmup || L.src !== "auto" ? "—" : `${L.delta < 0 ? "−" : "+"}${Math.abs(L.delta).toFixed(2)}°`,
-        L.base != null ? `初期位相 ${L.base}°` : "");
+        (L.base != null ? `初期位相 ${L.base}°` : "") + (L.gain != null && L.gain !== 1 ? `・ゲイン ${L.gain}` : "") + (L.test_offset ? `・試験 ${L.test_offset > 0 ? "+" : ""}${L.test_offset}°` : ""));
     const leads = cs.slice(-10).map(c => c.lead_ms).filter(x => x != null);
     set("ctHor", L.horizon != null ? `${Math.round(L.horizon * 1000)} ms` : "—",
         leads.length ? `実測 ${Math.round(med(leads))} ms（モーション → 窓の中央）` : "");
@@ -861,7 +890,8 @@ PANEL_JS = """
     K.hover = best; drawCorr();
     const c = best, card = val("corrCard").getBoundingClientRect();
     tip.innerHTML = `<b>収録 #${c.cap}</b>　${c.t.toFixed(1)} 秒<br>BER ${berTxt(c.errors, c.bits)}（${c.errors.toLocaleString()} / ${c.bits.toLocaleString()} ビット、取得 ${c.frames}/${c.expected}）<br>` +
-      `位相差 ${c.phase != null ? c.phase.toFixed(2) + "°" : "—"}` + (c.delta != null && isAuto(c) ? `（初期 ${c.base}° ${c.delta < 0 ? "−" : "+"} ${Math.abs(c.delta).toFixed(2)}°）` : "") + `<br>` +
+      `位相差 ${c.phase != null ? c.phase.toFixed(2) + "°" : "—"}` + (c.delta != null && isAuto(c) ? `（初期 ${c.base}° ${c.delta < 0 ? "−" : "+"} ${Math.abs(c.delta).toFixed(2)}°` + (c.gain != null && c.gain !== 1 ? `（モデル ${c.delta_model.toFixed(2)}° × ${c.gain}）` : "") +
+        (c.test_offset ? ` ${c.test_offset < 0 ? "−" : "+"} 試験 ${Math.abs(c.test_offset)}°` : "") + `）` : "") + `<br>` +
       `${stateOf(c)}` + (c.lead_ms != null ? `<br>先読み ${Math.round(c.horizon * 1000)} ms・実測 ${Math.round(c.lead_ms)} ms` : "") +
       `<br>窓の中でマーカーが全部見えていた ${Math.round(c.valid * 100)} %`;
     tip.style.display = "block";
@@ -1091,6 +1121,8 @@ PANEL_JS = """
   val("mAuto").onchange = () => mpost("/api/motion/options", { auto_phase: val("mAuto").checked });
   val("mHor").onchange = () => mpost("/api/motion/options", { horizon: +val("mHor").value });
   val("mSwap").onchange = () => mpost("/api/motion/options", { swap_lr: val("mSwap").checked });
+  val("mOffT").onchange = () => mpost("/api/motion/options", { offset_test: val("mOffT").checked });
+  val("mGain").onchange = () => mpost("/api/motion/options", { gain: +val("mGain").value });
   val("cOpen").onclick = () => mpost("/api/camera/open", { index: +val("cIndex").value });
   val("cClose").onclick = () => mpost("/api/camera/close");
   val("cRec").onchange = () => mpost("/api/motion/options", { record_video: val("cRec").checked });
@@ -1111,6 +1143,8 @@ PANEL_JS = """
     V.c = V.r = null;
     val("cImg").src = "";
     val("mPredH").disabled = val("mPredMode").disabled = !meta;
+    // 表示・先読みを選んだら重ねる (「予測を重ねる」が入っていないと何も出ないため)
+    val("mPredMode").onchange = val("mPredH").onchange = () => { val("mPred").checked = true; };
     view = meta && meta.camera_view ? viewFromCamera(meta.camera_view) : VIEW0;
     resetView();
     if (meta) {
@@ -1805,7 +1839,8 @@ def motion_status() -> dict:
     s = bg.SESSION
     logging = isinstance(s, MotionSessionLog) and MOTION.sink is not None
     return dict(MOTION.status(), require_motion=OPTS["require_motion"], auto_phase=OPTS["auto_phase"],
-                horizon=OPTS["horizon"], swap_lr=OPTS["swap_lr"], model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
+                horizon=OPTS["horizon"], swap_lr=OPTS["swap_lr"], offset_test=OPTS["offset_test"], gain=OPTS["gain"],
+                test_offsets=list(phase_control.TEST_OFFSETS), model=PHASE_MODEL_NAME, logging=logging, log_dir=s.dir.name if logging else "", last=LAST,
                 corr=corr_recent(), ref_warmup=phase_control.REF_WARMUP,
                 camera=CAMERA.status(), record_video=OPTS["record_video"],
                 video_recording=logging and getattr(s, "video", None) is not None,
@@ -1961,6 +1996,11 @@ class Handler(bg.Handler):
             if "swap_lr" in q and bool(q["swap_lr"]) != OPTS["swap_lr"]:
                 OPTS["swap_lr"] = bool(q["swap_lr"])
                 reset_phase_ref()                                  # 推定が変わるので、いまの位相を初期位相に取り直す
+            if "gain" in q:
+                OPTS["gain"] = phase_control.parse_gain(q["gain"])  # 次の収録から。基準は取り直さない (基準からの変化に掛ける)
+            if "offset_test" in q:
+                OPTS["offset_test"] = bool(q["offset_test"])       # 次の収録から。基準は取り直さない (足すのは基準の後)
+                _TEST_SEQ.clear()
             if "record_video" in q:
                 OPTS["record_video"] = bool(q["record_video"])     # 次の記録から効く
             return dict(ok=True)
@@ -2005,6 +2045,10 @@ def main() -> int:
                          f" (既定 {phase_control.HORIZONS[0]:g} = 収録窓 95 ms の中央の見込み。画面でも変えられる)")
     ap.add_argument("--swap-lr", action="store_true",
                     help="Motive のラベルが左右逆。位相のモデルに渡すマーカー名だけ入れ替える (画面でも変えられる)")
+    ap.add_argument("--offset-test", action="store_true",
+                    help="補正量の試験: 自動補正に phase_control.TEST_OFFSETS を収録ごとに足す (画面でも変えられる)")
+    ap.add_argument("--gain", type=phase_control.parse_gain, default=phase_control.DEFAULT_GAIN,
+                    help="補正のゲイン: 送る位相 = 初期位相 + gain × モデルの補正量 (既定 1。画面でも変えられる)")
     ap.add_argument("--replay", nargs="?", const="latest", metavar="FOLDER",
                     help="記録の再生用の画面で開く (装置には触らない)。FOLDER を省くといちばん新しい記録")
     ap.add_argument("--video-only", action="store_true",
@@ -2022,6 +2066,8 @@ def main() -> int:
     MOTION.set_group(a.group)
     OPTS["horizon"] = a.horizon
     OPTS["swap_lr"] = a.swap_lr
+    OPTS["offset_test"] = a.offset_test
+    OPTS["gain"] = a.gain
     if a.phase_model:
         PHASE_MODEL = phase_control.load(a.phase_model)
         PHASE_MODEL_NAME = Path(a.phase_model).name
