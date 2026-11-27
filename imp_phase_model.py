@@ -1,14 +1,16 @@
 """imp_phase_model.py -- モーション → 先のインピーダンス → W2−W1 位相差 (`--phase-model` に渡すモデル)。
 
-    uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1121.joblib を作る
+    uv run train_imp_model.py                                  # 最初に 1 回。models/imp_1125.joblib を作る
     uv run motion_ber_gui.py --phase-model imp_phase_model.py --group upper_side   # 画面の「位相の自動調整」で入り切り
 
 モデルは 2 種類 (学習したファイルの kind で決まる。使うマーカーの組が違う):
-  * "rpy_same4" (8 マーカー = 計測部位「上半身・side」。2026-11-22 から既定、学習データ 1121):
+  * "rpy_same4" (8 マーカー = 計測部位「上半身・side」。2026-11-22 から既定。学習データは 2026-11-27 から 1125、それまで 1121):
       コイルごとに独立。左コイルは左腕、右コイルは右腕の 4 個だけを使う。4 個 = 上腕 (upperarm → joint) と
       前腕 (joint → forearm) の向きを体幹の座標系 (左右 = L_side → R_side、上下 = 重力) で表したピッチ・ヨー。
       Ridge AR もこの 4 個の角度で先読みする (ヨーは ±180° の折り返しを考えた差分)。
       ../2026_motion_to_meander_imp/report_20261122_imu_features.pdf の 7 章 (2123 で学習 → 2101 で 100 ms 先の位相 RMSE 5.32°)。
+      1125 (7 本、体の正面・腕の交差・頭上・前屈を含む) は report_20261127_dataset1125.pdf: 他の 6 本で学習 → 残り 1 本で
+      100 ms 先の位相 RMSE 4.74° (1121 で学習したモデルでは 5.87°)。
   * "side6" (7 マーカー = 計測部位「上半身」、学習データ 1118 まで): 下の 1〜2 の手順。
   今のモデルのマーカーが記録・配信に無いときは、もう一方のモデル (FALLBACK_MODEL_PATH) があれば自動でそちらを使う
   (7 マーカーの古い記録を再生したときなど)。
@@ -56,7 +58,7 @@ import numpy as np
 from phase_control import HORIZON_GRID, HORIZONS, PHASE_OFFSET_DEG  # 学習する先読み = HORIZON_GRID (0.02〜0.30 s、0.01 刻み)
 
 HERE = Path(__file__).resolve().parent
-DATASET = "1121"        # 学習データ (8 マーカーは report1120_run.DATASETS、7 マーカーは report0923_common.DATASETS のキー)
+DATASET = "1125"        # 学習データ (8 マーカーは report1120_run.DATASETS、7 マーカーは report0923_common.DATASETS のキー)
 MODEL_PATH = Path(os.environ.get("IMP_MODEL", HERE / "models" / f"imp_{DATASET}.joblib"))
 # 今のモデルのマーカーが無いときに使うモデル (7 マーカーの記録・配信用)。無ければ使わない
 FALLBACK_MODEL_PATH = Path(os.environ.get("IMP_MODEL_FALLBACK", HERE / "models" / "imp_1118.joblib"))
